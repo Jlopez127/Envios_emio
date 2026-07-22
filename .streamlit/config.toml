@@ -1,0 +1,17 @@
+# Tema ejecutivo sobrio. El sidebar se estiliza SOLO acá (nativo), nunca con CSS.
+
+[theme]
+base = "light"
+primaryColor = "#334155"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f7fa"
+textColor = "#1f2937"
+font = "sans serif"
+
+[theme.sidebar]
+backgroundColor = "#eef2f7"
+secondaryBackgroundColor = "#e2e8f0"
+textColor = "#334155"
+
+[server]
+headless = true

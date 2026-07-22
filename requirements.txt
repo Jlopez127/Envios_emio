@@ -1,0 +1,8 @@
+streamlit==1.50.0
+streamlit-authenticator==0.4.2
+pandas
+anthropic
+dropbox
+openpyxl
+pypdfium2
+pytest

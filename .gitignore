@@ -1,0 +1,32 @@
+# --- Credenciales / secretos (NUNCA commitear) ---
+.streamlit/secrets.toml
+secrets.toml
+*.secrets.toml
+.env
+
+# --- Documentación interna (datos reales de negocio / credenciales) ---
+docs_internos/
+
+# --- Diseños / adjuntos ---
+*.zip
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Entornos virtuales ---
+.venv/
+venv/
+env/
+
+# --- Fixtures reales con PII (manifiestos ASTRID) ---
+# El export real trae nombres/direcciones/telefonos de clientes. Se queda LOCAL:
+# los tests hacen skip si no esta (ver tests/fixtures/README.md). NO commitear.
+tests/fixtures/*.xlsx
+
+# --- Sistema operativo ---
+.DS_Store
+Thumbs.db
