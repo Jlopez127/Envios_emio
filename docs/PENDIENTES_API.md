@@ -57,6 +57,31 @@ con la API de Anthropic → hoja `TULAS_REPORTADAS` en Dropbox, append-only, lla
   dato de la API y este flujo (hoja + extracción de tulas) queda obsoleto.
 - Buscar `TULAS_REPORTADAS` y `pantalla_tulas` en el repo para ubicarlo.
 
+## Consolidaciones de despacho — alta manual (PENDIENTE_API)
+
+En Colombia se consolidan varios envíos en un despacho para abaratar costo (rompe el
+1:1 guía↔cobro). Hoy el `DespachoConsolidado` (hoja `CONSOLIDACIONES`) se **carga a
+mano** por admin (seleccionar guías del manifiesto + peso total + valor cobrado).
+
+- **PENDIENTE_API:** si la API de ASTRID llega a exponer las consolidaciones (qué guías
+  entran en cada despacho, peso total y valor), reemplazar la carga manual por el dato
+  de la API. El motor (`costo_consolidado`, `ahorro_consolidado`,
+  `conciliar_consolidado`) y el no-doble-conteo (`guias_consolidadas`) no cambian.
+
+## Reajustes — módulo futuro (hoy solo recepción y archivo)
+
+Los **reajustes** (hoja `REAJUSTES`) están implementados **solo** como recepción,
+extracción best-effort y archivo del documento en Dropbox (`/portal_envios/reajustes/`).
+El extractor de reajustes es **genérico y tolerante** porque **no hay ejemplo del
+formato**: devuelve `{manifiesto_id, guia, valor_usd, motivo, fecha, texto_resumen}` con
+**todo `null` si no reconoce** el documento (nunca inventa); los campos son editables a
+mano en la tab admin de Reajustes.
+
+- **Futuro (no en esta fase):** el flujo de negocio del reajuste —
+  notificación al cliente, decisión de **quién asume la pérdida**, y **cobro/ajuste**
+  contable— queda fuera de alcance. Cuando se conozca el formato real y se defina el
+  proceso, ajustar el extractor a los campos concretos y agregar el flujo.
+
 ## Otros apoyos provisionales (a retirar con la API)
 
 - **Drill-down de tula por heurística** (`core/vista.py` `envios_de_tula`, `app.py`

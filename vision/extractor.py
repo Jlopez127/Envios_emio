@@ -1,9 +1,14 @@
 """Extracción de datos de documentos con visión de la API de Anthropic.
 
 `extraer(imagenes, tipo_documento)` soporta:
-  - "factura_aerolinea": FacturaAerolinea (ver docs/CONTRATO_DATOS.md).
+  - "factura_aerolinea": FacturaAerolinea (ver docs/CONTRATO_DATOS.md), incluye
+    fecha_vencimiento y terminos_pago (null si no aparecen).
   - "pantalla_tulas": pesos reportados por tula (flujo provisional, ver
     docs/PENDIENTES_API.md).
+  - "comprobante_transferencia": comprobante de pago que sube el admin (visión) para
+    marcar un gasto como pagado.
+  - "reajuste": documento de reajuste (formato desconocido → extractor GENÉRICO y
+    tolerante; todo null si no lo reconoce). Solo recepción/archivo en esta fase.
   - "factura_transportadora": DECLARADO pero NO implementado -> NotImplementedError.
 
 Reglas duras:
@@ -49,12 +54,55 @@ explicaciones:
  "kg_cobrados": number|null, "tarifa_kg_usd": number|null, "awb_fee_usd": number|null,
  "pickup_entrega_usd": number|null,
  "otros_cargos": [{"concepto": string, "valor": number}],
- "total_usd": number|null}
+ "total_usd": number|null,
+ "fecha_vencimiento": string|null, "terminos_pago": string|null}
 
 Reglas:
 - Si un campo no se lee con CERTEZA, poné null. NUNCA inventes ni estimes un valor.
 - Números sin símbolo de moneda ni separadores de miles; usá punto como decimal.
-- otros_cargos: lista vacía [] si no hay cargos adicionales."""
+- otros_cargos: lista vacía [] si no hay cargos adicionales.
+- fecha_vencimiento: la "Due Date" / fecha de vencimiento (YYYY-MM-DD si es posible).
+- terminos_pago: el texto de términos tal cual (ej. "Net 30 Days"); null si no aparece."""
+
+_PROMPT_COMPROBANTE = """Sos un extractor de comprobantes de transferencia bancaria.
+Devolvé EXCLUSIVAMENTE un JSON válido con esta forma exacta, sin texto adicional:
+
+{"fecha": string|null, "monto": number|null, "referencia": string|null,
+ "banco": string|null, "destinatario": string|null}
+
+Reglas:
+- Si un campo no se lee con CERTEZA, poné null. NUNCA inventes valores.
+- monto: el importe transferido, con punto como decimal, sin símbolo ni miles.
+- referencia: número de operación / comprobante / confirmación.
+- destinatario: a quién se le pagó (beneficiario), si aparece."""
+
+_PROMPT_DESPACHO = """Sos un extractor de facturas de despacho nacional (transportadora
+ASTRID en Colombia). Devolvé EXCLUSIVAMENTE un JSON válido con esta forma exacta, sin
+texto adicional:
+
+{"numero_factura": string|null, "fecha": string|null, "manifiesto_id": string|null,
+ "guia": string|null, "lb_facturadas": number|null, "valor_usd": number|null,
+ "total_usd": number|null, "fecha_vencimiento": string|null, "terminos_pago": string|null}
+
+Reglas:
+- Si un campo no se lee con CERTEZA, poné null. NUNCA inventes valores.
+- total_usd: el total a pagar de la factura; valor_usd: el cobro de la guía si la
+  factura es de una sola guía (si no, dejalo null y usá total_usd).
+- Números con punto como decimal, sin símbolo ni separadores de miles.
+- fecha_vencimiento / terminos_pago: si aparecen (Due Date / "Net 30"); null si no."""
+
+_PROMPT_REAJUSTE = """Sos un extractor GENÉRICO y tolerante de documentos de "reajuste"
+de despacho (el formato es desconocido y variable). Devolvé EXCLUSIVAMENTE un JSON
+válido con esta forma exacta, sin texto adicional:
+
+{"manifiesto_id": string|null, "guia": string|null, "valor_usd": number|null,
+ "motivo": string|null, "fecha": string|null, "texto_resumen": string|null}
+
+Reglas:
+- Si NO reconocés un campo con certeza, poné null. NUNCA inventes ni adivines valores.
+- texto_resumen: un resumen breve (1-2 frases) de lo que dice el documento; si el
+  documento es ilegible, poné null.
+- valor_usd: monto del reajuste con punto como decimal; null si no hay o es ambiguo."""
 
 _PROMPT_TULAS = """Sos un extractor de una pantalla/correo de tulas del sistema ASTRID.
 Devolvé EXCLUSIVAMENTE un JSON válido con esta forma exacta, sin texto adicional:
@@ -74,6 +122,9 @@ Reglas:
 _PROMPTS = {
     "factura_aerolinea": _PROMPT_FACTURA,
     "pantalla_tulas": _PROMPT_TULAS,
+    "comprobante_transferencia": _PROMPT_COMPROBANTE,
+    "reajuste": _PROMPT_REAJUSTE,
+    "factura_despacho": _PROMPT_DESPACHO,
 }
 
 CAMPOS_FACTURA_CRITICOS = [
@@ -242,14 +293,71 @@ def validar_tulas(datos: dict, tol: float = 0.1):
     return True, []
 
 
+def validar_comprobante(datos: dict, factura_total: float | None = None, tol: float = 0.02):
+    """(registrable, avisos). Registrable si hay `monto` legible. Si se pasa el total de
+    la factura y difiere del monto, se AVISA (no bloquea: puede haber pago parcial o
+    agrupado). El destinatario/banco/fecha no bloquean."""
+    if datos.get("monto") is None:
+        return False, ["monto ilegible (null): no se puede registrar el pago"]
+    avisos = []
+    if factura_total is not None and abs(float(datos["monto"]) - float(factura_total)) > tol:
+        avisos.append(
+            f"el monto del comprobante ({datos['monto']}) difiere del total de la factura "
+            f"({round(float(factura_total), 2)}) — puede ser pago parcial o agrupado")
+    if not datos.get("referencia"):
+        avisos.append("sin referencia de operación legible — registrará el pago sin referencia")
+    return True, avisos
+
+
+def validar_despacho(datos: dict):
+    """(cuadra, motivos). Cuadra si hay un monto (total_usd o valor_usd) legible. El
+    manifiesto_id puede faltar (se selecciona/ingresa a mano)."""
+    monto = datos.get("total_usd")
+    if monto is None:
+        monto = datos.get("valor_usd")
+    if monto is None:
+        return False, ["monto ilegible (null): total_usd y valor_usd nulos"]
+    return True, []
+
+
+def gasto_real_desde_despacho(datos: dict, manifiesto_id: str, *, usuario=None) -> dict:
+    """GastoReal(distribucion) desde una factura de despacho de ASTRID. Pendiente de
+    pago; captura vencimiento/términos. El monto es total_usd (o valor_usd si es
+    factura de una sola guía)."""
+    from core import modelos  # perezoso
+    total = datos.get("total_usd")
+    if total is None:
+        total = datos.get("valor_usd")
+    detalle = {
+        "guia": datos.get("guia"),
+        "lb_facturadas": datos.get("lb_facturadas"),
+        "valor_usd": datos.get("valor_usd"),
+        "terminos_pago": datos.get("terminos_pago"),
+    }
+    return modelos.gasto_real(
+        manifiesto_id=manifiesto_id,
+        concepto="distribucion",
+        referencia=datos.get("numero_factura"),
+        total_usd=total,
+        proveedor="ASTRID",
+        detalle=detalle,
+        origen="vision",
+        fecha=datos.get("fecha") or date.today().isoformat(),
+        fecha_vencimiento=datos.get("fecha_vencimiento"),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Construcción del GastoReal (detalle_json = fuente canónica de la factura)
 # --------------------------------------------------------------------------- #
 
 def gasto_real_desde_factura(datos: dict, manifiesto_id: str, *, proveedor=None,
-                             origen: str = "vision", fecha=None) -> dict:
-    """GastoReal de importación. `detalle_json` guarda la FacturaAerolinea completa
-    (fuente canónica; no hay almacén de facturas aparte — ver docs/CONTRATO_DATOS.md)."""
+                             concepto: str = "importacion", origen: str = "vision",
+                             fecha=None) -> dict:
+    """GastoReal desde una factura extraída. `detalle_json` guarda la factura completa
+    (fuente canónica; no hay almacén de facturas aparte — ver docs/CONTRATO_DATOS.md).
+    Nace `pendiente` de pago; captura `fecha_vencimiento` y `terminos_pago` si vienen."""
+    from core import modelos  # perezoso (evita ciclo)
     detalle = {
         "kg_cobrados": datos.get("kg_cobrados"),
         "tarifa_kg_usd": datos.get("tarifa_kg_usd"),
@@ -257,14 +365,16 @@ def gasto_real_desde_factura(datos: dict, manifiesto_id: str, *, proveedor=None,
         "pickup_entrega_usd": datos.get("pickup_entrega_usd"),
         "otros_cargos": datos.get("otros_cargos") or [],
         "awb": datos.get("awb"),
+        "terminos_pago": datos.get("terminos_pago"),
     }
-    return {
-        "fecha": fecha or datos.get("fecha") or date.today().isoformat(),
-        "manifiesto_id": manifiesto_id,
-        "proveedor": proveedor or "Aerolínea",
-        "concepto": "importacion",
-        "referencia": datos.get("numero_factura"),
-        "detalle_json": json.dumps(detalle, ensure_ascii=False),
-        "total_usd": datos.get("total_usd"),
-        "origen": origen,
-    }
+    return modelos.gasto_real(
+        manifiesto_id=manifiesto_id,
+        concepto=concepto,
+        referencia=datos.get("numero_factura"),
+        total_usd=datos.get("total_usd"),
+        proveedor=proveedor or "Aerolínea",
+        detalle=detalle,
+        origen=origen,
+        fecha=fecha or datos.get("fecha") or date.today().isoformat(),
+        fecha_vencimiento=datos.get("fecha_vencimiento"),
+    )

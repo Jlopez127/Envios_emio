@@ -20,6 +20,9 @@ Novedad = dict
 GastoReal = dict
 CobroDistribucion = dict
 TulaReportada = dict
+Pago = dict
+DespachoConsolidado = dict
+Reajuste = dict
 
 
 class FuenteDropbox(ABC):
@@ -69,6 +72,51 @@ class FuenteDropbox(ABC):
     @abstractmethod
     def agregar_tulas_reportadas(self, registro: TulaReportada) -> bool:
         """Agrega un peso reportado de tula. Idempotente por (manifiesto_id, numero_tula)."""
+        raise NotImplementedError
+
+    # -- Pagos (hoja PAGOS) ----------------------------------------------- #
+    # Marcar un gasto como pagado NO edita su fila: se agrega una fila de PAGO que lo
+    # referencia por su llave (manifiesto_id, concepto, referencia). La lectura del
+    # estado de pago consolida (último pago gana; ver modelos.consolidar_estado_pago).
+    @abstractmethod
+    def leer_pagos(self) -> list:
+        raise NotImplementedError
+
+    @abstractmethod
+    def agregar_pago(self, pago: Pago) -> bool:
+        """Agrega un pago. Idempotente por (manifiesto_id, concepto, referencia, referencia_pago)."""
+        raise NotImplementedError
+
+    # -- Consolidaciones (hoja CONSOLIDACIONES) --------------------------- #
+    @abstractmethod
+    def leer_consolidaciones(self) -> list:
+        raise NotImplementedError
+
+    @abstractmethod
+    def agregar_consolidado(self, consolidado: DespachoConsolidado) -> bool:
+        """Agrega un despacho consolidado. Idempotente por (manifiesto_id, consolidado_id)."""
+        raise NotImplementedError
+
+    # -- Reajustes (hoja REAJUSTES) --------------------------------------- #
+    @abstractmethod
+    def leer_reajustes(self) -> list:
+        raise NotImplementedError
+
+    @abstractmethod
+    def agregar_reajuste(self, reajuste: Reajuste) -> bool:
+        """Agrega un reajuste recibido. Idempotente por `archivo_ref` (ruta del documento)."""
+        raise NotImplementedError
+
+    # -- Archivos adjuntos (comprobantes de pago, documentos de reajuste) - #
+    @abstractmethod
+    def guardar_archivo(self, subcarpeta: str, nombre: str, datos: bytes) -> str:
+        """Guarda un archivo binario y devuelve su ruta/ref (para comprobante_ref /
+        archivo_ref). `subcarpeta` p.ej. 'comprobantes' o 'reajustes'."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def leer_archivo(self, ruta: str) -> bytes:
+        """Devuelve los bytes del archivo en `ruta` (subido con guardar_archivo)."""
         raise NotImplementedError
 
     # -- Tarifario -------------------------------------------------------- #

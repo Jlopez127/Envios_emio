@@ -41,7 +41,7 @@ def test_modo_abierto_sin_auth_renderiza():
     # Ni [auth] ni AUTH_USERS -> modo abierto (aviso) y dashboard visible.
     at = _run()
     assert not at.exception
-    assert len(at.tabs) == 5
+    assert len(at.tabs) == 6
     assert any("modo abierto" in w.value for w in at.warning)
 
 
@@ -68,7 +68,7 @@ def test_login_ok_usuario_autorizado_renderiza():
     at = _run(auth_secret=_AUTH_SECRET,
               session={"authentication_status": True, "username": "admin1", "name": "Admin Uno"})
     assert not at.exception
-    assert len(at.tabs) == 5
+    assert len(at.tabs) == 6
     assert not any("no autorizado" in e.value.lower() for e in at.error)
     # proteger() rotula la sesión del usuario (en caption o markdown del sidebar).
     textos = [c.value for c in at.caption] + [m.value for m in at.markdown]

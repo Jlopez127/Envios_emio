@@ -13,7 +13,8 @@ from datasources.dropbox_base import FuenteDropbox
 EXCEL_PATH = "/portal/registro.xlsx"
 
 HOJAS_ESPERADAS = {"NOVEDADES", "GASTOS_REALES", "COBROS_DISTRIBUCION",
-                   "TULAS_REPORTADAS", "TARIFARIO"}
+                   "TULAS_REPORTADAS", "PAGOS", "CONSOLIDACIONES", "REAJUSTES",
+                   "TARIFARIO"}
 
 
 def _nov(mid, guia, tipo="cobro_distribucion"):
@@ -142,3 +143,50 @@ def test_lecturas_vacias_si_no_existe(api):
     assert api.leer_gastos_reales() == []
     assert api.leer_cobros_distribucion() == []
     assert api.leer_tulas_reportadas() == []
+    assert api.leer_pagos() == []
+    assert api.leer_consolidaciones() == []
+    assert api.leer_reajustes() == []
+
+
+# --- Pagos / consolidaciones / reajustes / archivos (nuevo alcance) ------- #
+
+def test_idempotencia_pago(api):
+    p = {"manifiesto_id": "M1", "concepto": "importacion", "referencia": "F1",
+         "referencia_pago": "OP-1", "monto_usd": 100.0, "usuario": "admin1", "estado_pago": "pagado"}
+    assert api.agregar_pago(p) is True
+    assert api.agregar_pago(dict(p)) is False
+    assert api.agregar_pago({**p, "referencia_pago": "OP-2"}) is True
+
+
+def test_consolidado_guias_roundtrip_json(api):
+    c = {"consolidado_id": "C1", "manifiesto_id": "M1", "guias": ["g1", "g2", "g3"],
+         "peso_total_lb": 12.0, "valor_cobrado_usd": 12.0, "transportadora": "T"}
+    assert api.agregar_consolidado(c) is True
+    leidos = api.leer_consolidaciones()
+    assert leidos[0]["guias"] == ["g1", "g2", "g3"]       # lista reconstruida desde JSON
+    assert api.agregar_consolidado(dict(c)) is False      # idempotente
+
+
+def test_idempotencia_reajuste(api):
+    r = {"fecha": "2026-07-18", "manifiesto_id": "M1", "guia": None, "valor_usd": None,
+         "motivo": None, "texto_resumen": "x", "archivo_ref": "/p/reajustes/r.pdf",
+         "usuario": "prov1", "origen": "vision"}
+    assert api.agregar_reajuste(r) is True
+    assert api.agregar_reajuste(dict(r)) is False
+    assert api.agregar_reajuste({**r, "archivo_ref": "/p/reajustes/r2.pdf"}) is True
+
+
+def test_gasto_incluye_columnas_de_pago(api):
+    g = {"manifiesto_id": "M1", "concepto": "importacion", "referencia": "F1",
+         "detalle_json": "{}", "total_usd": 100.0, "proveedor": "X", "origen": "manual",
+         "fecha": "2026-07-16", "estado_pago": "pendiente", "fecha_vencimiento": "2026-08-15"}
+    assert api.agregar_gasto_real(g) is True
+    leidos = api.leer_gastos_reales()
+    assert leidos[0]["estado_pago"] == "pendiente"
+    assert leidos[0]["fecha_vencimiento"] == "2026-08-15"
+
+
+def test_guardar_y_leer_archivo(api, dbx):
+    ruta = api.guardar_archivo("comprobantes", "c.png", b"img")
+    assert ruta.endswith("/comprobantes/c.png")
+    assert api.leer_archivo(ruta) == b"img"

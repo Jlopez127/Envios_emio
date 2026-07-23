@@ -14,10 +14,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Optional
 
 OK = "ok"
 NO_DISPONIBLE = "no_disponible"
+
+# Estados de pago derivados (ver docs/CONTRATO_DATOS.md).
+PAGO_PENDIENTE = "pendiente"
+PAGO_PAGADO = "pagado"
+PAGO_VENCIDO = "vencido"
 
 
 # --------------------------------------------------------------------------- #
@@ -234,6 +240,88 @@ def costo_distribucion(peso_lb: Optional[float], tarifario: Optional[Tarifario] 
         total = tarifario.dist_base_usd + (lb - tarifario.dist_base_lb) * tarifario.dist_usd_lb_extra
     return Resultado.disponible(round(float(total), 2),
                                 detalle={"lb_facturable": lb, "peso_lb": peso_lb})
+
+
+# --------------------------------------------------------------------------- #
+# Distribución consolidada (varias guías en un despacho: misma regla, peso TOTAL)
+# --------------------------------------------------------------------------- #
+
+def costo_consolidado(despacho: dict, tarifario: Optional[Tarifario] = None) -> Resultado:
+    """Costo esperado de un DespachoConsolidado: MISMA regla de distribución
+    (dist_base hasta dist_base_lb, luego dist_usd_lb_extra por lb) aplicada sobre el
+    peso TOTAL consolidado, NO por guía. Sin peso total → no_disponible."""
+    tarifario = tarifario or Tarifario()
+    return costo_distribucion(despacho.get("peso_total_lb"), tarifario)
+
+
+def ahorro_consolidado(despacho: dict, manifiesto: Optional[dict] = None,
+                       tarifario: Optional[Tarifario] = None) -> Resultado:
+    """Métrica de ahorro del consolidado: suma de costos individuales (una por guía,
+    a su peso) vs. costo consolidado (peso total). ahorro = individual − consolidado.
+
+    Los pesos individuales salen del `manifiesto` (por guía). Guías sin envío/peso se
+    omiten del individual y se listan en `detalle["guias_sin_peso"]` (trazable). Sin
+    peso total del consolidado → no_disponible.
+    """
+    tarifario = tarifario or Tarifario()
+    cons = costo_consolidado(despacho, tarifario)
+    if not cons.ok:
+        return cons
+
+    pesos_por_guia = {}
+    for e in (manifiesto or {}).get("envios") or []:
+        if e.get("guia") is not None and e.get("peso_lb") is not None:
+            pesos_por_guia[e["guia"]] = e["peso_lb"]
+
+    individual, sin_peso = 0.0, []
+    for guia in despacho.get("guias") or []:
+        peso = pesos_por_guia.get(guia)
+        if peso is None:
+            sin_peso.append(guia)
+            continue
+        individual += costo_distribucion(peso, tarifario).valor
+    individual = round(individual, 2)
+    consolidado = cons.valor
+    ahorro = round(individual - consolidado, 2)
+
+    advertencias = []
+    if sin_peso:
+        advertencias.append(
+            f"{len(sin_peso)} guía(s) del consolidado sin peso en el datasource — "
+            "excluidas del costo individual")
+    return Resultado.disponible(ahorro, detalle={
+        "consolidado_id": despacho.get("consolidado_id"),
+        "n_guias": len(despacho.get("guias") or []),
+        "costo_individual_usd": individual,
+        "costo_consolidado_usd": consolidado,
+        "ahorro_usd": ahorro,
+        "guias_sin_peso": sin_peso,
+    }, advertencias=advertencias)
+
+
+# --------------------------------------------------------------------------- #
+# Estado de pago (pendiente / pagado / vencido) de un GastoReal
+# --------------------------------------------------------------------------- #
+
+def estado_pago_efectivo(gasto: dict, hoy: Optional[date] = None) -> str:
+    """Estado de pago EFECTIVO de un gasto ya consolidado (ver modelos.consolidar_estado_pago):
+
+    - "pagado"   si `estado_pago == "pagado"`.
+    - "vencido"  si no está pagado y `fecha_vencimiento` existe y ya pasó.
+    - "pendiente" en el resto.
+    """
+    if gasto.get("estado_pago") == PAGO_PAGADO:
+        return PAGO_PAGADO
+    venc = gasto.get("fecha_vencimiento")
+    if venc:
+        hoy = hoy or date.today()
+        try:
+            fv = venc if hasattr(venc, "year") else date.fromisoformat(str(venc)[:10])
+        except (ValueError, TypeError):
+            fv = None
+        if fv is not None and fv < hoy:
+            return PAGO_VENCIDO
+    return PAGO_PENDIENTE
 
 
 # --------------------------------------------------------------------------- #

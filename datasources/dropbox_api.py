@@ -40,14 +40,24 @@ HOJA_NOVEDADES = "NOVEDADES"
 HOJA_GASTOS = "GASTOS_REALES"
 HOJA_COBROS = "COBROS_DISTRIBUCION"
 HOJA_TULAS = "TULAS_REPORTADAS"
+HOJA_PAGOS = "PAGOS"
+HOJA_CONSOLIDACIONES = "CONSOLIDACIONES"
+HOJA_REAJUSTES = "REAJUSTES"
 HOJA_TARIFARIO = "TARIFARIO"
 
 COLS_NOVEDADES = ["fecha", "usuario", "manifiesto_id", "tula_codigo", "guia", "tipo",
                   "valor_esperado", "valor_real", "delta", "justificacion", "accion", "estado"]
 COLS_GASTOS = ["fecha", "manifiesto_id", "proveedor", "concepto", "referencia",
-               "detalle_json", "total_usd", "origen"]
+               "detalle_json", "total_usd", "origen",
+               "estado_pago", "fecha_pago", "referencia_pago", "fecha_vencimiento", "comprobante_ref"]
 COLS_COBROS = ["guia", "manifiesto_id", "transportadora", "lb_facturadas", "valor_usd"]
 COLS_TULAS = ["manifiesto_id", "numero_tula", "kg_reportado", "awb_master", "fecha", "usuario", "origen"]
+COLS_PAGOS = ["fecha", "manifiesto_id", "concepto", "referencia", "monto_usd",
+              "referencia_pago", "banco", "destinatario", "comprobante_ref", "usuario", "estado_pago"]
+COLS_CONSOLIDACIONES = ["consolidado_id", "manifiesto_id", "guias", "peso_total_lb",
+                        "valor_cobrado_usd", "transportadora"]
+COLS_REAJUSTES = ["fecha", "manifiesto_id", "guia", "valor_usd", "motivo", "texto_resumen",
+                  "archivo_ref", "usuario", "origen"]
 COLS_TARIFARIO = ["clave", "valor"]
 
 _HOJAS = {
@@ -55,6 +65,9 @@ _HOJAS = {
     HOJA_GASTOS: COLS_GASTOS,
     HOJA_COBROS: COLS_COBROS,
     HOJA_TULAS: COLS_TULAS,
+    HOJA_PAGOS: COLS_PAGOS,
+    HOJA_CONSOLIDACIONES: COLS_CONSOLIDACIONES,
+    HOJA_REAJUSTES: COLS_REAJUSTES,
 }
 
 
@@ -76,6 +89,18 @@ def _llave_cobro(d):
 
 def _llave_tula(d):
     return (d.get("manifiesto_id"), d.get("numero_tula"))
+
+
+def _llave_pago(d):
+    return (d.get("manifiesto_id"), d.get("concepto"), d.get("referencia"), d.get("referencia_pago"))
+
+
+def _llave_consolidado(d):
+    return (d.get("manifiesto_id"), d.get("consolidado_id"))
+
+
+def _llave_reajuste(d):
+    return (d.get("archivo_ref"),)
 
 
 def _es_not_found(exc) -> bool:
@@ -203,6 +228,40 @@ class FuenteDropboxAPI(FuenteDropbox):
     def agregar_tulas_reportadas(self, registro) -> bool:
         return self._agregar(HOJA_TULAS, COLS_TULAS, registro, _llave_tula)
 
+    def leer_pagos(self) -> list:
+        return self._leer(HOJA_PAGOS, COLS_PAGOS)
+
+    def agregar_pago(self, pago) -> bool:
+        return self._agregar(HOJA_PAGOS, COLS_PAGOS, pago, _llave_pago)
+
+    def leer_consolidaciones(self) -> list:
+        filas = self._leer(HOJA_CONSOLIDACIONES, COLS_CONSOLIDACIONES)
+        for f in filas:  # `guias` se guarda como JSON string -> reconstruir lista
+            f["guias"] = _guias_desde_celda(f.get("guias"))
+        return filas
+
+    def agregar_consolidado(self, consolidado) -> bool:
+        return self._agregar(HOJA_CONSOLIDACIONES, COLS_CONSOLIDACIONES, consolidado, _llave_consolidado)
+
+    def leer_reajustes(self) -> list:
+        return self._leer(HOJA_REAJUSTES, COLS_REAJUSTES)
+
+    def agregar_reajuste(self, reajuste) -> bool:
+        return self._agregar(HOJA_REAJUSTES, COLS_REAJUSTES, reajuste, _llave_reajuste)
+
+    # -- Archivos adjuntos (comprobantes / documentos de reajuste) ---------- #
+
+    def guardar_archivo(self, subcarpeta: str, nombre: str, datos: bytes) -> str:
+        from dropbox.files import WriteMode
+        base = config.dropbox_manifiestos_path().rstrip("/") or "/portal_envios"
+        ruta = posixpath.join(base, subcarpeta.strip("/"), nombre)
+        self._dbx.files_upload(bytes(datos), ruta, mode=WriteMode("overwrite"))
+        return ruta
+
+    def leer_archivo(self, ruta: str) -> bytes:
+        _, respuesta = self._dbx.files_download(ruta)
+        return respuesta.content
+
     def leer_tarifario(self) -> Tarifario:
         """SOLO LECTURA. Precedencia: hoja TARIFARIO (Dropbox) > env/secret > default DEMO.
         La base (env/secret > DEMO) sale de config.tarifario_base(); la hoja, si existe,
@@ -233,3 +292,16 @@ def _celda(valor):
     if isinstance(valor, (list, dict)):
         return json.dumps(valor, ensure_ascii=False)
     return valor
+
+
+def _guias_desde_celda(valor) -> list:
+    """Reconstruye la lista de guías de un consolidado desde su celda (JSON string)."""
+    if isinstance(valor, list):
+        return valor
+    if not valor:
+        return []
+    try:
+        data = json.loads(valor)
+        return data if isinstance(data, list) else []
+    except (TypeError, ValueError):
+        return [g.strip() for g in str(valor).split(",") if g.strip()]

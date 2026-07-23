@@ -208,6 +208,48 @@ def conciliar_distribucion(envio: dict, cobro: Optional[dict],
 
 
 # --------------------------------------------------------------------------- #
+# Conciliación de despacho consolidado (peso total, no por guía)
+# --------------------------------------------------------------------------- #
+
+def conciliar_consolidado(despacho: dict, manifiesto: Optional[dict] = None,
+                          tarifario: Optional[Tarifario] = None) -> dict:
+    """Concilia un DespachoConsolidado: esperado sobre el peso TOTAL consolidado vs.
+    valor cobrado, más la métrica de ahorro (suma individual vs. consolidado).
+
+    Estados: conciliado | discrepancia | no_disponible (sin peso total).
+    """
+    tarifario = tarifario or Tarifario()
+    esp = calculos.costo_consolidado(despacho, tarifario)
+    if not esp.ok:
+        return {"estado": NO_DISPONIBLE, "consolidado_id": despacho.get("consolidado_id"),
+                "manifiesto_id": despacho.get("manifiesto_id"), "motivo": esp.motivo}
+
+    esperado = esp.valor
+    cobrado = despacho.get("valor_cobrado_usd")
+    ahorro_res = calculos.ahorro_consolidado(despacho, manifiesto, tarifario)
+
+    resultado = {
+        "consolidado_id": despacho.get("consolidado_id"),
+        "manifiesto_id": despacho.get("manifiesto_id"),
+        "n_guias": len(despacho.get("guias") or []),
+        "peso_total_lb": despacho.get("peso_total_lb"),
+        "esperado_usd": esperado,
+        "valor_cobrado_usd": cobrado,
+        "lb_facturable_esperada": esp.detalle.get("lb_facturable"),
+        "ahorro_usd": ahorro_res.valor if ahorro_res.ok else None,
+        "costo_individual_usd": ahorro_res.detalle.get("costo_individual_usd") if ahorro_res.ok else None,
+        "advertencias": list(ahorro_res.advertencias) if ahorro_res.ok else [],
+    }
+    if cobrado is None:
+        resultado["estado"] = "sin_cobro"
+        return resultado
+    delta = round(cobrado - esperado, 2)
+    resultado["delta"] = delta
+    resultado["estado"] = "conciliado" if abs(delta) <= 0.01 else "discrepancia"
+    return resultado
+
+
+# --------------------------------------------------------------------------- #
 # P&L (por manifiesto y por período)
 # --------------------------------------------------------------------------- #
 

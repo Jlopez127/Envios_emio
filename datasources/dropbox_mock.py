@@ -18,6 +18,7 @@ import copy
 from datetime import date
 
 import config
+from core.calculos import Tarifario
 from datasources.dropbox_base import CobroDistribucion, FuenteDropbox, GastoReal, Novedad
 
 # --- Precarga (DEMO sintético; cuadra con el tarifario DEMO 1.00/10/50) ---- #
@@ -32,7 +33,21 @@ _GASTO_DEMO = {
                      '"awb_fee_usd": 10.0, "pickup_entrega_usd": 50.0, "otros_cargos": []}'),
     "total_usd": 834.00,
     "origen": "manual",
+    # Estado de pago: nace pendiente, con vencimiento (Net 30 desde la fecha).
+    "estado_pago": "pendiente",
+    "fecha_pago": None,
+    "referencia_pago": None,
+    "fecha_vencimiento": date(2026, 8, 15).isoformat(),
+    "comprobante_ref": None,
 }
+
+# Despacho consolidado DEMO sobre guías del mock 900007 (comercial 100006/7/8): muestra
+# el ahorro y evita el doble conteo (esas guías NO figuran como pendientes individuales).
+_CONSOLIDADOS_PRECARGA = [
+    {"consolidado_id": "CONS-900007-01", "manifiesto_id": "900007",
+     "guias": ["100006", "100007", "100008"], "peso_total_lb": 24.0,
+     "valor_cobrado_usd": 21.0, "transportadora": "TransConsol"},
+]
 
 # Guías que existen en el mock 900007 (rango comercial/estándar). Valores NO enteros
 # para garantizar delta != 0 contra el esperado (que siempre es entero).
@@ -62,6 +77,18 @@ def _llave_tula_reportada(t: dict) -> tuple:
     return (t.get("manifiesto_id"), t.get("numero_tula"))
 
 
+def _llave_pago(p: dict) -> tuple:
+    return (p.get("manifiesto_id"), p.get("concepto"), p.get("referencia"), p.get("referencia_pago"))
+
+
+def _llave_consolidado(c: dict) -> tuple:
+    return (c.get("manifiesto_id"), c.get("consolidado_id"))
+
+
+def _llave_reajuste(r: dict) -> tuple:
+    return (r.get("archivo_ref"),)
+
+
 class FuenteDropboxMock(FuenteDropbox):
     """Persistencia en memoria (ver docstring del módulo)."""
 
@@ -70,6 +97,10 @@ class FuenteDropboxMock(FuenteDropbox):
         self._gastos: list = [copy.deepcopy(_GASTO_DEMO)]
         self._cobros: list = [copy.deepcopy(c) for c in _COBROS_PRECARGA]
         self._tulas_reportadas: list = []
+        self._pagos: list = []
+        self._consolidaciones: list = [copy.deepcopy(c) for c in _CONSOLIDADOS_PRECARGA]
+        self._reajustes: list = []
+        self._archivos: dict = {}
         self._tarifario = config.tarifario_base()
 
     # -- Lecturas (copias defensivas) ------------------------------------- #
@@ -84,6 +115,15 @@ class FuenteDropboxMock(FuenteDropbox):
 
     def leer_tulas_reportadas(self) -> list:
         return copy.deepcopy(self._tulas_reportadas)
+
+    def leer_pagos(self) -> list:
+        return copy.deepcopy(self._pagos)
+
+    def leer_consolidaciones(self) -> list:
+        return copy.deepcopy(self._consolidaciones)
+
+    def leer_reajustes(self) -> list:
+        return copy.deepcopy(self._reajustes)
 
     def leer_tarifario(self) -> Tarifario:
         return self._tarifario
@@ -116,3 +156,33 @@ class FuenteDropboxMock(FuenteDropbox):
             return False
         self._tulas_reportadas.append(copy.deepcopy(registro))
         return True
+
+    def agregar_pago(self, pago) -> bool:
+        llave = _llave_pago(pago)
+        if any(_llave_pago(p) == llave for p in self._pagos):
+            return False
+        self._pagos.append(copy.deepcopy(pago))
+        return True
+
+    def agregar_consolidado(self, consolidado) -> bool:
+        llave = _llave_consolidado(consolidado)
+        if any(_llave_consolidado(c) == llave for c in self._consolidaciones):
+            return False
+        self._consolidaciones.append(copy.deepcopy(consolidado))
+        return True
+
+    def agregar_reajuste(self, reajuste) -> bool:
+        llave = _llave_reajuste(reajuste)
+        if any(_llave_reajuste(r) == llave for r in self._reajustes):
+            return False
+        self._reajustes.append(copy.deepcopy(reajuste))
+        return True
+
+    # -- Archivos adjuntos (en memoria) ----------------------------------- #
+    def guardar_archivo(self, subcarpeta: str, nombre: str, datos: bytes) -> str:
+        ruta = f"/portal_envios/{subcarpeta.strip('/')}/{nombre}"
+        self._archivos[ruta] = bytes(datos)
+        return ruta
+
+    def leer_archivo(self, ruta: str) -> bytes:
+        return self._archivos[ruta]

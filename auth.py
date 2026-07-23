@@ -1,17 +1,31 @@
-"""Autenticación con streamlit-authenticator 0.4.x.
+"""Autenticación y ROLES con streamlit-authenticator 0.4.x.
 
 Usuarios admin autorizados. streamlit-authenticator tiene un BUG CONOCIDO de casing:
-por eso TODO se maneja en minúsculas — las claves de username del secrets y TODA
-comparación de permisos con `.strip().lower()`; el set de autorizados va en minúsculas.
+por eso TODO se maneja en minúsculas — las claves de username del secrets, los roles y
+TODA comparación de permisos con `.strip().lower()`; el set de autorizados va en minúsculas.
 
 Config vía secrets (`[auth]`, nunca en el repo). **Modo abierto** (sin login) SOLO en
 local, cuando NO hay `[auth]` NI `AUTH_USERS`. En el host, con `AUTH_USERS` presente, el
 login es OBLIGATORIO: si falta `[auth]`, error claro, nunca modo abierto.
+
+ROLES (dos, por usuario):
+  - "admin"     → acceso total (5 tabs + todo lo nuevo). Usuarios internos.
+  - "proveedor" → acceso EXCLUSIVO a su tab. Acceso EXTERNO: NUNCA ve P&L, utilidad,
+    ingresos, conciliación de aerolínea, tarifas, clientes, destinos ni novedades.
+El rol se define por usuario en el secret: campo `role` en
+`[auth.credentials.usernames.<u>]`, o forma plana `AUTH_ROLES="user:rol,..."`
+(env/secret `[auth] roles`). Sin rol explícito y estando autorizado → "admin"
+(compatibilidad con `AUTH_USERS`). `AUTH_ROLES` (plano) tiene prioridad sobre el
+campo `role` de credenciales.
 """
 
 import os
 
 import streamlit as st
+
+ROL_ADMIN = "admin"
+ROL_PROVEEDOR = "proveedor"
+ROLES_VALIDOS = {ROL_ADMIN, ROL_PROVEEDOR}
 
 
 def normalizar(u):
@@ -45,8 +59,73 @@ def _cargar_admins(raw=None):
 ADMIN_USERS = _cargar_admins()
 
 
-def es_admin(username):
-    return normalizar(username) in ADMIN_USERS
+def _parsear_roles(raw):
+    """{username_lower: rol} desde un dict (`[auth] roles`) o un string
+    "user:rol,user2:rol". Roles no válidos se ignoran (nunca se inventa un rol)."""
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        pares = raw.items()
+    else:
+        pares = (p.split(":", 1) for p in str(raw).split(",") if ":" in p)
+    roles = {}
+    for u, r in pares:
+        u, r = normalizar(u), normalizar(r)
+        if u and r in ROLES_VALIDOS:
+            roles[u] = r
+    return roles
+
+
+def _roles_raw():
+    """Valor crudo de `AUTH_ROLES` (env o secret `[auth] roles`), o None."""
+    raw = os.environ.get("AUTH_ROLES")
+    if not raw:
+        try:
+            import config
+            raw = config.get_secret("auth", "roles", "AUTH_ROLES")
+        except Exception:
+            raw = None
+    return raw or None
+
+
+# Roles explícitos desde env/secret plano (AUTH_ROLES). Los roles por-usuario del
+# bloque [auth.credentials] se combinan en tiempo de login (ver `proteger`).
+_ROLES = _parsear_roles(_roles_raw())
+
+
+def rol_de(username, roles=None):
+    """Rol del usuario: explícito (`roles` map) > "admin" si está en `ADMIN_USERS` >
+    None. `None` = usuario NO autorizado (no tiene rol conocido ni está en AUTH_USERS)."""
+    u = normalizar(username)
+    mapa = _ROLES if roles is None else roles
+    if u in mapa:
+        return mapa[u]
+    if u in ADMIN_USERS:
+        return ROL_ADMIN
+    return None
+
+
+def es_admin(username, roles=None):
+    return rol_de(username, roles) == ROL_ADMIN
+
+
+def es_proveedor(username, roles=None):
+    return rol_de(username, roles) == ROL_PROVEEDOR
+
+
+def es_autorizado(username, roles=None):
+    """True si el usuario tiene un rol conocido (admin o proveedor)."""
+    return rol_de(username, roles) is not None
+
+
+def _roles_desde_credenciales(credenciales):
+    """{username_lower: rol} leídos del campo `role` de cada usuario en credenciales."""
+    roles = {}
+    for u, datos in ((credenciales or {}).get("usernames") or {}).items():
+        r = normalizar((datos or {}).get("role"))
+        if r in ROLES_VALIDOS:
+            roles[normalizar(u)] = r
+    return roles
 
 
 def _modo_auth(cfg_presente, auth_users_configurado):
@@ -81,10 +160,12 @@ def _config_desde_secrets():
 
 
 def proteger():
-    """Protege el dashboard. Devuelve el username (minúsculas) autenticado y autorizado.
+    """Protege el dashboard. Devuelve `(username, rol)` autenticado y autorizado.
 
-    - `modo abierto` (ni `[auth]` ni `AUTH_USERS`) → aviso y devuelve None (el caller usa
-      un usuario de sesión). Solo local.
+    `rol` es "admin" o "proveedor"; el caller gatea el render por rol.
+
+    - `modo abierto` (ni `[auth]` ni `AUTH_USERS`) → aviso y devuelve `(None, "admin")`
+      (el caller usa un usuario de sesión). Solo local.
     - `sin_config` (`AUTH_USERS` presente pero falta `[auth]`) → error y detiene: en el
       host el login es obligatorio, nunca modo abierto.
     - `login` (`[auth]` configurado) → login; credenciales inválidas o usuario no
@@ -97,7 +178,7 @@ def proteger():
         st.warning("⚠️ Autenticación NO configurada — **modo abierto** (solo desarrollo "
                    "local). Para producción, configurá `[auth]` (y `AUTH_USERS`) en los "
                    "secrets del host (ver README).")
-        return None
+        return None, ROL_ADMIN
 
     if modo == "sin_config":
         st.error("🔒 Login obligatorio: `AUTH_USERS` está configurado pero falta la sección "
@@ -112,6 +193,8 @@ def proteger():
         st.stop()
 
     credenciales, cookie = cfg
+    # Roles combinados: campo `role` de credenciales, con `AUTH_ROLES` (plano) por encima.
+    roles = {**_roles_desde_credenciales(credenciales), **_ROLES}
     authenticator = stauth.Authenticate(
         credenciales,
         cookie.get("name", "encargomio_portal"),
@@ -129,7 +212,7 @@ def proteger():
         st.stop()
 
     username = normalizar(st.session_state.get("username"))
-    if not es_admin(username):
+    if not es_autorizado(username, roles):
         st.error(f"Usuario «{username}» no autorizado para este portal.")
         with st.sidebar:
             try:
@@ -138,10 +221,11 @@ def proteger():
                 pass
         st.stop()
 
+    rol = rol_de(username, roles)
     with st.sidebar:
-        st.caption(f"Sesión: **{st.session_state.get('name', username)}**")
+        st.caption(f"Sesión: **{st.session_state.get('name', username)}** · rol: {rol}")
         try:
             authenticator.logout("Cerrar sesión", "sidebar")
         except Exception:
             pass
-    return username
+    return username, rol

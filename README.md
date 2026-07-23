@@ -16,21 +16,37 @@ Streamlit + Python, deploy en HuggingFace Spaces. **Sin base de datos**: los dat
 operativos se consultan en vivo (mock / export ASTRID en Dropbox / API futura) y lo
 único que persiste es un Excel en Dropbox (append-only).
 
-## Las 5 tabs
+## Roles y aislamiento (acceso externo)
+
+**ASTRID** (proveedor del despacho nacional) tiene acceso **externo** al portal: sube sus
+facturas de despacho/reajustes y ve el estado de pago de sus facturas. Por eso hay **dos
+roles**, definidos por usuario en el secret de auth:
+
+- **`admin`** (interno) — acceso total: las 6 tabs de abajo.
+- **`proveedor`** (externo) — acceso **exclusivo** a su vista: sus facturas de despacho y
+  estado de pago (con comprobante), y carga de facturas/reajustes. **Nunca** ve P&L,
+  utilidad, márgenes, ingresos, conciliación de aerolínea, tarifas, clientes, destinos ni
+  novedades. El aislamiento es en el **render** (esas tabs y sus datos **no se
+  construyen** en sesión de proveedor), no visual. Ver "Secrets" para configurar el rol.
+
+## Las 6 tabs (rol admin)
 
 1. **📊 Vista general** — filtros propios (fechas + manifiestos); KPIs (valor cobrado al
    cliente, pagado a aerolíneas, pagado a ASTRID, utilidad, #manifiestos/#envíos, kg,
-   peso promedio, % con factura) y gráficos (destinos, clientes, envíos/kg por manifiesto).
+   peso promedio, % con factura), **cuentas por pagar** (pendiente aerolíneas/ASTRID,
+   vencido), **ahorro por consolidación**, manifiestos sin factura, y gráficos.
 2. **✈️ Entrada a Colombia** — por manifiesto: pactado (motor) vs cobrado por la
-   aerolínea, en dos caminos (peso aerolínea vs báscula, y cobro tarifa/cargos) + pagos
-   a aerolínea.
-3. **🚚 Despacho en Colombia** — por guía: esperado (regla 8 lb) vs cobro de **ASTRID**
-   (factura la distribución nacional) + pagos a ASTRID.
-4. **⚖️ Novedades** — novedades de peso con drill-down por tula (sus envíos, o heurística
-   honesta si el export no trae asignación), justificación de novedades, manifiestos sin
-   cobro, e historial de resueltas.
-5. **📤 Cargar archivos** — carga por visión (Anthropic) de facturas de aerolínea y
-   pantallazos de tulas; placeholder de factura de despacho ASTRID.
+   aerolínea, en dos caminos (peso aerolínea vs báscula, y cobro tarifa/cargos) +
+   **estado de pago** (badges pendiente/pagado/vencido, "Registrar pago") + pagos.
+3. **🚚 Despacho en Colombia** — por guía: esperado (regla 8 lb) vs cobro de **ASTRID** +
+   **despachos consolidados** (esperado sobre peso total + ahorro; sus guías no se
+   doble-cuentan) + estado de pago a ASTRID + pagos.
+4. **⚖️ Novedades** — novedades de peso con drill-down por tula, justificación,
+   manifiestos sin cobro, e historial de resueltas.
+5. **📤 Cargar archivos** — carga por visión (Anthropic) de facturas de aerolínea,
+   pantallazos de tulas y **facturas de despacho ASTRID** (si el proveedor no las sube).
+6. **🧾 Reajustes** — recepción y archivo de reajustes (extracción genérica best-effort,
+   editable) + listado. Solo recepción en esta fase (ver `docs/PENDIENTES_API.md`).
 
 ## Flags de datasource (variables de entorno / Space)
 
@@ -55,6 +71,7 @@ Modo producción típico en el Space: `DATASOURCE_ASTRID=excel`, `DATASOURCE_DRO
 | Rutas Dropbox (opcional) | `[dropbox] manifiestos_path / excel_path` | `DROPBOX_MANIFIESTOS_PATH` / `DROPBOX_EXCEL_PATH` |
 | Auth | `[auth]` (ver abajo) | — |
 | Usuarios admin autorizados | `[auth] usuarios` | `AUTH_USERS` (coma-separados) |
+| Rol por usuario | campo `role` en `[auth.credentials.usernames.<u>]` | `AUTH_ROLES="user:rol,..."` (o `[auth] roles`) |
 | Tarifas y umbrales (opcional) | `[tarifario] imp_tarifa_kg / imp_awb_fee / imp_pickup / …` | `TARIFA_IMP_KG` / `TARIFA_IMP_AWB_FEE` / `TARIFA_IMP_PICKUP` / … |
 | Manifiestos legacy (opcional) | `[manifiestos] legacy` (JSON) | `MANIFIESTOS_LEGACY` (JSON) |
 
@@ -87,15 +104,22 @@ expiry_days = 7
 name = "Admin Uno"
 email = "admin1@example.com"
 password = "$2b$..."   # hash bcrypt
+role = "admin"          # opcional; sin role y estando autorizado → admin
 
 [auth.credentials.usernames.admin2]
 name = "Admin Dos"
 password = "$2b$..."
 
-[auth.credentials.usernames.admin3]
-name = "Admin Tres"
+[auth.credentials.usernames.proveedor1]
+name = "ASTRID"
 password = "$2b$..."
+role = "proveedor"      # acceso EXTERNO: solo su vista propia
 ```
+
+**Roles.** El rol se define por usuario: campo `role` (`admin` | `proveedor`) en el
+bloque de credenciales, o forma plana `AUTH_ROLES="proveedor1:proveedor,..."` (env o
+`[auth] roles`), que **gana** sobre el campo `role`. Sin rol explícito, un usuario
+autorizado (en `AUTH_USERS`) es **`admin`**. Usernames y roles en **minúsculas**.
 
 **Usernames SIEMPRE en minúsculas** (bug de casing de streamlit-authenticator; el portal
 normaliza a minúsculas y los usuarios deben ingresar en minúsculas). Usuarios autorizados:

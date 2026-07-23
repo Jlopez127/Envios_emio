@@ -160,7 +160,8 @@ _CSS = """
 st.markdown(_CSS, unsafe_allow_html=True)
 
 # Gate de autenticación (detiene si no está autenticado; None = modo abierto con aviso).
-usuario_auth = auth.proteger()
+# Devuelve (usuario, rol): el rol gatea TODO el render (aislamiento del proveedor).
+usuario_auth, rol_auth = auth.proteger()
 
 
 # --------------------------------------------------------------------------- #
@@ -210,6 +211,21 @@ def cargar_tarifario():
 @st.cache_data(ttl=600)
 def cargar_tulas_reportadas():
     return _fuente_dropbox().leer_tulas_reportadas()
+
+
+@st.cache_data(ttl=600)
+def cargar_pagos():
+    return _fuente_dropbox().leer_pagos()
+
+
+@st.cache_data(ttl=600)
+def cargar_consolidaciones():
+    return _fuente_dropbox().leer_consolidaciones()
+
+
+@st.cache_data(ttl=600)
+def cargar_reajustes():
+    return _fuente_dropbox().leer_reajustes()
 
 
 # --------------------------------------------------------------------------- #
@@ -601,11 +617,369 @@ def _seccion_vision_tulas(manifiestos, usuario):
 
 
 # --------------------------------------------------------------------------- #
+# Estado de pago: badges, registro de pago (comprobante por visión) y comprobante
+# --------------------------------------------------------------------------- #
+
+def _badge_pago(gasto):
+    """Badge del estado de pago EFECTIVO del gasto (pendiente/pagado/vencido)."""
+    efectivo = calculos.estado_pago_efectivo(gasto)
+    cls = {"pagado": "badge-ok", "vencido": "badge-bad"}.get(efectivo, "badge-warn")
+    return f'<span class="badge {cls}">{efectivo}</span>'
+
+
+def _clave_gasto_str(g):
+    return f"{g.get('manifiesto_id')}|{g.get('concepto')}|{g.get('referencia')}"
+
+
+def _ver_comprobante(gasto):
+    """Muestra la imagen del comprobante de pago (si hay), leída de Dropbox."""
+    ref = gasto.get("comprobante_ref")
+    if not ref:
+        return
+    try:
+        data = _fuente_dropbox().leer_archivo(ref)
+    except Exception as exc:
+        st.caption(f"Comprobante registrado ({ref}) — no se pudo leer: {exc}")
+        return
+    if str(ref).lower().endswith(".pdf"):
+        st.caption(f"Comprobante (PDF) registrado: {ref}")
+    else:
+        try:
+            st.image(data, caption="Comprobante de transferencia", width=340)
+        except Exception:
+            st.caption(f"Comprobante registrado: {ref}")
+
+
+def _registrar_pago(gasto, usuario):
+    """Sube comprobante → visión → valida contra el total de la factura (avisa, no
+    bloquea) → confirma → escribe fila PAGO (append-only) + archivo en Dropbox."""
+    key = "pago_" + _clave_gasto_str(gasto)
+    up = st.file_uploader("Comprobante de transferencia (pdf/imagen)",
+                          type=["pdf", "png", "jpg", "jpeg"], key=key + "_up")
+    if up is not None and st.button("Extraer comprobante", key=key + "_ext"):
+        with st.spinner("Extrayendo con visión…"):
+            try:
+                imgs = extractor.preparar(up.name, up.getvalue())
+                st.session_state[key + "_datos"] = extractor.extraer(imgs, "comprobante_transferencia")
+                st.session_state[key + "_arch"] = (up.name, up.getvalue())
+            except Exception as exc:
+                st.error(f"No se pudo extraer: {exc}")
+    datos = st.session_state.get(key + "_datos")
+    if not datos:
+        return
+
+    tabla(["Campo", "Valor extraído"], [
+        ["Fecha", datos.get("fecha")], ["Monto", datos.get("monto")],
+        ["Referencia", datos.get("referencia")], ["Banco", datos.get("banco")],
+        ["Destinatario", datos.get("destinatario")]])
+    cuadra, avisos = extractor.validar_comprobante(datos, gasto.get("total_usd"))
+    for a in avisos:
+        banner(f"⚠️ {a}", "warn")
+    if not cuadra:
+        with st.form(key + "_form"):
+            monto = st.number_input("Monto (corregir)", value=0.0, format="%.2f")
+            ref = st.text_input("Referencia", value=datos.get("referencia") or "")
+            if st.form_submit_button("Revalidar"):
+                datos.update({"monto": monto, "referencia": ref or None})
+                st.session_state[key + "_datos"] = datos
+                st.rerun()
+        return
+
+    if st.button("✍️ Confirmar pago", key=key + "_ok"):
+        comp_ref = None
+        try:
+            arch = st.session_state.get(key + "_arch")
+            if arch is not None:
+                nombre, contenido = arch
+                comp_ref = _fuente_dropbox().guardar_archivo(
+                    "comprobantes", f"{_clave_gasto_str(gasto)}-{nombre}".replace("|", "_"), contenido)
+            pago = modelos.construir_pago(
+                gasto=gasto, monto_usd=datos.get("monto"),
+                referencia_pago=datos.get("referencia"), usuario=usuario,
+                banco=datos.get("banco"), destinatario=datos.get("destinatario"),
+                comprobante_ref=comp_ref)
+            ok = _fuente_dropbox().agregar_pago(pago)
+        except Exception as exc:
+            st.error(f"No se pudo registrar el pago en Dropbox: {exc}. Reintentá.")
+            return
+        cargar_pagos.clear()
+        st.success("Pago registrado." if ok else "Pago ya registrado (idempotente).")
+        for suf in ("_datos", "_arch"):
+            st.session_state.pop(key + suf, None)
+        st.rerun()
+
+
+def _seccion_estado_pago(gastos, concepto, entidad, usuario):
+    """Estado de pago de los gastos de un concepto: totales + fila por gasto con badge,
+    'Registrar pago' (si no está pagado) y comprobante (si está pagado)."""
+    sub = [g for g in gastos if g.get("concepto") == concepto]
+    cp = vista.cuentas_por_pagar(sub)
+    cols = st.columns(4)
+    tarjeta(cols[0], "Facturado", _usd(cp["facturado_usd"]))
+    tarjeta(cols[1], "Pagado", _usd(cp["pagado_usd"]))
+    tarjeta(cols[2], "Pendiente", _usd(cp["pendiente_total_usd"]))
+    tarjeta(cols[3], "Vencido", _usd(cp["vencido_usd"]),
+            sub=(f"{cp['n_vencidas']} factura(s)" if cp["n_vencidas"] else None))
+    if not sub:
+        banner(f"Sin facturas de {entidad} registradas todavía.", "info")
+        return
+    for g in sorted(sub, key=lambda x: str(x.get("fecha"))):
+        efectivo = calculos.estado_pago_efectivo(g)
+        titulo = (f"{g.get('referencia') or '—'} · {g.get('manifiesto_id')} · "
+                  f"{_usd(g.get('total_usd'))} · venc: {g.get('fecha_vencimiento') or '—'}")
+        with st.expander(titulo, expanded=(efectivo == "vencido")):
+            st.markdown(_badge_pago(g), unsafe_allow_html=True)
+            if efectivo == "pagado":
+                st.caption(f"Pagado el {g.get('fecha_pago') or '—'} · ref: "
+                           f"{g.get('referencia_pago') or '—'}")
+                _ver_comprobante(g)
+            else:
+                _registrar_pago(g, usuario)
+
+
+# --------------------------------------------------------------------------- #
+# Consolidaciones (despacho nacional): listado, ahorro y alta manual (admin)
+# --------------------------------------------------------------------------- #
+
+def _seccion_consolidaciones(manifiestos, tarifario, consolidados, usuario):
+    st.markdown('<div class="bloque-titulo">Despachos consolidados (varias guías en un despacho)</div>',
+                unsafe_allow_html=True)
+    por_id = {m["id"]: m for m in manifiestos}
+    agg = vista.ahorro_consolidados(consolidados, manifiestos, tarifario)
+    if consolidados:
+        cc = st.columns(3)
+        tarjeta(cc[0], "Costo individual (suma)", _usd(agg["individual_usd"]))
+        tarjeta(cc[1], "Costo consolidado", _usd(agg["consolidado_usd"]))
+        tarjeta(cc[2], "Ahorro por consolidar", _usd(agg["ahorro_usd"]))
+        for c in consolidados:
+            r = conciliacion.conciliar_consolidado(c, por_id.get(c.get("manifiesto_id")), tarifario)
+            with st.expander(f"{c.get('consolidado_id')} · {c.get('manifiesto_id')} · "
+                             f"{len(c.get('guias') or [])} guías · {r['estado']}",
+                             expanded=(r["estado"] == "discrepancia")):
+                for adv in r.get("advertencias", []):
+                    banner(f"⚠️ {adv}", "warn")
+                col = st.columns(4)
+                tarjeta(col[0], "Esperado (peso total)", _usd(r.get("esperado_usd")))
+                tarjeta(col[1], "Cobrado ASTRID", _usd(r.get("valor_cobrado_usd")))
+                tarjeta(col[2], "Diferencia", _usd(r.get("delta")))
+                tarjeta(col[3], "Ahorro", _usd(r.get("ahorro_usd")))
+                st.caption(f"Peso total: {_num(c.get('peso_total_lb'), ' lb')} · "
+                           f"guías: {', '.join(str(g) for g in (c.get('guias') or []))}")
+    else:
+        st.caption("Sin despachos consolidados registrados.")
+
+    with st.expander("➕ Registrar consolidación manual"):
+        _form_consolidado_manual(manifiestos, consolidados, usuario)
+
+
+def _form_consolidado_manual(manifiestos, consolidados, usuario):
+    etiqueta = st.selectbox("Manifiesto", [f"{m['id']} · {m['fecha']}" for m in manifiestos],
+                            key="cons_manif")
+    m = next(x for x in manifiestos if etiqueta.startswith(x["id"]))
+    guias = [e.get("guia") for e in m.get("envios", []) if e.get("guia")]
+    n_previos = sum(1 for c in consolidados if c.get("manifiesto_id") == m["id"])
+    with st.form("form_consolidado"):
+        cid = st.text_input("ID de consolidación", value=f"CONS-{m['id']}-{n_previos + 1:02d}")
+        sel = st.multiselect("Guías incluidas", guias, key="cons_guias")
+        peso = st.number_input("Peso total consolidado (lb)", min_value=0.0, format="%.2f")
+        valor = st.number_input("Valor cobrado (USD)", min_value=0.0, format="%.2f")
+        transp = st.text_input("Transportadora", value="")
+        if st.form_submit_button("Guardar consolidación"):
+            if not sel:
+                st.warning("Seleccioná al menos una guía.")
+                return
+            consol = modelos.construir_consolidado(
+                consolidado_id=cid, manifiesto_id=m["id"], guias=sel,
+                peso_total_lb=peso, valor_cobrado_usd=valor, transportadora=transp or None)
+            try:
+                ok = _fuente_dropbox().agregar_consolidado(consol)
+            except Exception as exc:
+                st.error(f"No se pudo guardar en Dropbox: {exc}. Reintentá.")
+                return
+            cargar_consolidaciones.clear()
+            st.success("Consolidación registrada." if ok else "Ya existía (idempotente).")
+            st.rerun()
+
+
+# --------------------------------------------------------------------------- #
+# Factura de despacho por visión (proveedor o admin) → CobroDistribucion + GastoReal
+# --------------------------------------------------------------------------- #
+
+def _seccion_vision_despacho(usuario, *, proveedor=False, manifiestos=None):
+    st.markdown('<div class="bloque-titulo">Cargar factura de despacho (API Anthropic)</div>',
+                unsafe_allow_html=True)
+    archivo = st.file_uploader("Factura de despacho ASTRID (pdf/png/jpg)",
+                               type=["pdf", "png", "jpg", "jpeg"], key="up_despacho")
+    if archivo is not None and st.button("Extraer factura de despacho", key="btn_ext_despacho"):
+        with st.spinner("Extrayendo con visión…"):
+            try:
+                imgs = extractor.preparar(archivo.name, archivo.getvalue())
+                st.session_state["despacho_extraido"] = extractor.extraer(imgs, "factura_despacho")
+            except Exception as exc:
+                st.error(f"No se pudo extraer: {exc}")
+    datos = st.session_state.get("despacho_extraido")
+    if not datos:
+        return
+
+    tabla(["Campo", "Valor extraído"], [
+        ["N° factura", datos.get("numero_factura")], ["Fecha", datos.get("fecha")],
+        ["Manifiesto", datos.get("manifiesto_id")], ["Guía", datos.get("guia")],
+        ["Valor guía USD", datos.get("valor_usd")], ["TOTAL USD", datos.get("total_usd")],
+        ["Vencimiento", datos.get("fecha_vencimiento")], ["Términos", datos.get("terminos_pago")]])
+
+    cuadra, motivos = extractor.validar_despacho(datos)
+    if not cuadra:
+        for mo in motivos:
+            banner(f"⚠️ {mo}", "warn")
+        with st.form("form_despacho"):
+            total = st.number_input("total_usd", value=0.0, format="%.2f")
+            if st.form_submit_button("Revalidar"):
+                datos["total_usd"] = total
+                st.session_state["despacho_extraido"] = datos
+                st.rerun()
+        return
+
+    # Manifiesto: del documento (o selector si es admin y no vino / no matchea).
+    mid = datos.get("manifiesto_id")
+    if not proveedor and manifiestos:
+        ids = [x["id"] for x in manifiestos]
+        if mid not in ids:
+            banner("Manifiesto no reconocido en el período. Seleccioná manualmente.", "info")
+            etiqueta = st.selectbox("Manifiesto", [f"{x['id']} · {x['fecha']}" for x in manifiestos],
+                                    key="sel_manif_despacho")
+            mid = next(x["id"] for x in manifiestos if etiqueta.startswith(x["id"]))
+    elif proveedor and not mid:
+        mid = st.text_input("ID de manifiesto (no vino en el documento)", value="", key="prov_mid") or None
+
+    if st.button("✍️ Confirmar factura de despacho", key="btn_conf_despacho"):
+        if not mid:
+            st.warning("Falta el manifiesto de la factura.")
+            return
+        try:
+            gasto = extractor.gasto_real_desde_despacho(datos, mid, usuario=usuario)
+            ok = _fuente_dropbox().agregar_gasto_real(gasto)
+            # Si la factura es de una sola guía, registrar también el CobroDistribucion.
+            if datos.get("guia") and datos.get("valor_usd") is not None:
+                _fuente_dropbox().agregar_cobro_distribucion({
+                    "guia": datos["guia"], "manifiesto_id": mid, "transportadora": "ASTRID",
+                    "lb_facturadas": datos.get("lb_facturadas"), "valor_usd": datos["valor_usd"]})
+        except Exception as exc:
+            st.error(f"No se pudo registrar en Dropbox: {exc}. Reintentá.")
+            return
+        cargar_gastos.clear()
+        cargar_cobros.clear()
+        st.success("Factura de despacho registrada (pendiente de pago)." if ok
+                   else "Factura de despacho ya registrada (idempotente).")
+        st.session_state.pop("despacho_extraido", None)
+        st.rerun()
+
+
+# --------------------------------------------------------------------------- #
+# Reajustes (recepción + archivo; formato desconocido → extractor genérico)
+# --------------------------------------------------------------------------- #
+
+def _seccion_vision_reajuste(usuario):
+    st.markdown('<div class="bloque-titulo">Cargar reajuste (recepción y archivo)</div>',
+                unsafe_allow_html=True)
+    st.caption("Formato desconocido: la extracción es best-effort (puede quedar en null). "
+               "Solo se archiva el documento y se registra lo extraído (editable).")
+    archivo = st.file_uploader("Documento de reajuste (pdf/png/jpg)",
+                               type=["pdf", "png", "jpg", "jpeg"], key="up_reajuste")
+    if archivo is not None and st.button("Extraer reajuste", key="btn_ext_reajuste"):
+        with st.spinner("Extrayendo con visión…"):
+            try:
+                imgs = extractor.preparar(archivo.name, archivo.getvalue())
+                st.session_state["reajuste_extraido"] = extractor.extraer(imgs, "reajuste")
+                st.session_state["reajuste_arch"] = (archivo.name, archivo.getvalue())
+            except Exception as exc:
+                st.error(f"No se pudo extraer: {exc}")
+    datos = st.session_state.get("reajuste_extraido")
+    if not datos:
+        return
+    st.markdown("**Campos extraídos (editables — la extracción es imprecisa):**")
+    with st.form("form_reajuste"):
+        mid = st.text_input("manifiesto_id", value=datos.get("manifiesto_id") or "")
+        guia = st.text_input("guia", value=datos.get("guia") or "")
+        valor = st.text_input("valor_usd", value=str(datos.get("valor_usd") or ""))
+        motivo = st.text_input("motivo", value=datos.get("motivo") or "")
+        resumen = st.text_area("texto_resumen", value=datos.get("texto_resumen") or "")
+        if st.form_submit_button("Archivar reajuste"):
+            try:
+                nombre, contenido = st.session_state.get("reajuste_arch", ("reajuste", b""))
+                ruta = _fuente_dropbox().guardar_archivo("reajustes", f"{mid or 'sin_manif'}-{nombre}", contenido)
+                try:
+                    valor_num = float(valor) if str(valor).strip() else None
+                except ValueError:
+                    valor_num = None
+                reg = modelos.construir_reajuste(
+                    usuario=usuario, archivo_ref=ruta, manifiesto_id=mid or None,
+                    guia=guia or None, valor_usd=valor_num, motivo=motivo or None,
+                    texto_resumen=resumen or None)
+                ok = _fuente_dropbox().agregar_reajuste(reg)
+            except Exception as exc:
+                st.error(f"No se pudo archivar en Dropbox: {exc}. Reintentá.")
+                return
+            cargar_reajustes.clear()
+            st.success("Reajuste archivado." if ok else "Reajuste ya archivado (idempotente).")
+            for k in ("reajuste_extraido", "reajuste_arch"):
+                st.session_state.pop(k, None)
+            st.rerun()
+
+
+def _seccion_reajustes_listado(reajustes):
+    st.markdown('<div class="bloque-titulo">Reajustes recibidos</div>', unsafe_allow_html=True)
+    if not reajustes:
+        st.info("No hay reajustes recibidos todavía.")
+        return
+    filas = [[r.get("fecha", ""), r.get("manifiesto_id") or "—", r.get("guia") or "—",
+              _usd(r.get("valor_usd")) if isinstance(r.get("valor_usd"), (int, float)) else "—",
+              r.get("motivo") or "—", r.get("usuario", ""),
+              (r.get("texto_resumen") or "")[:80]] for r in reajustes]
+    tabla(["Fecha", "Manifiesto", "Guía", "Valor", "Motivo", "Subido por", "Resumen"], filas)
+
+
+# --------------------------------------------------------------------------- #
+# PORTAL DE PROVEEDOR — vista EXCLUSIVA del rol proveedor (aislamiento en el RENDER).
+# No construye manifiestos, P&L, conciliación de aerolínea, clientes ni destinos.
+# --------------------------------------------------------------------------- #
+
+def _portal_proveedor(usuario):
+    st.caption("Portal de proveedor (ASTRID) · solo tus facturas de despacho y su estado de pago")
+    gastos = _leer_dropbox(cargar_gastos, [], "los gastos")
+    pagos = _leer_dropbox(cargar_pagos, [], "los pagos")
+    gastos = modelos.consolidar_estado_pago(gastos, pagos)
+    mis = [g for g in gastos if g.get("concepto") == "distribucion"]
+
+    st.markdown('<div class="bloque-titulo">Mis facturas de despacho</div>', unsafe_allow_html=True)
+    cp = vista.cuentas_por_pagar(mis)
+    cols = st.columns(4)
+    tarjeta(cols[0], "Facturado", _usd(cp["facturado_usd"]))
+    tarjeta(cols[1], "Pagado", _usd(cp["pagado_usd"]))
+    tarjeta(cols[2], "Pendiente", _usd(cp["pendiente_total_usd"]))
+    tarjeta(cols[3], "Vencido", _usd(cp["vencido_usd"]))
+    if not mis:
+        st.info("No tenés facturas de despacho registradas todavía.")
+    else:
+        filas = [[g.get("referencia") or "—", g.get("fecha", ""), _usd(g.get("total_usd")),
+                  g.get("fecha_vencimiento") or "—", _badge_pago(g),
+                  g.get("fecha_pago") or "—", g.get("referencia_pago") or "—"] for g in mis]
+        tabla(["N° factura", "Fecha", "Monto", "Vencimiento", "Estado", "Fecha pago", "Ref. pago"], filas)
+        pagadas = [g for g in mis if calculos.estado_pago_efectivo(g) == "pagado" and g.get("comprobante_ref")]
+        for g in pagadas:
+            with st.expander(f"Comprobante de {g.get('referencia') or g.get('manifiesto_id')}"):
+                _ver_comprobante(g)
+
+    st.divider()
+    _seccion_vision_despacho(usuario, proveedor=True)
+    st.divider()
+    _seccion_vision_reajuste(usuario)
+
+
+# --------------------------------------------------------------------------- #
 # Sidebar: usuario, período, datasource
 # --------------------------------------------------------------------------- #
 
 st.title("📦 Portal de Envíos Encargomío")
-st.caption("Miami → Colombia · conciliación y P&L · USD")
 
 with st.sidebar:
     st.subheader("Sesión")
@@ -613,6 +987,20 @@ with st.sidebar:
         usuario = usuario_auth
     else:
         usuario = st.text_input("Usuario (modo abierto)", value="admin1")
+
+rol = rol_auth or auth.ROL_ADMIN
+
+# AISLAMIENTO POR ROL. El proveedor (acceso EXTERNO) SOLO ve su portal: acá se corta el
+# render y NUNCA se construyen manifiestos, P&L, conciliación de aerolínea, tarifas,
+# clientes, destinos ni novedades. La restricción es en el RENDER, no visual. El
+# subtítulo con "P&L/conciliación" es admin-only (abajo), no lo ve el proveedor.
+if rol == auth.ROL_PROVEEDOR:
+    _portal_proveedor(usuario)
+    st.stop()
+
+st.caption("Miami → Colombia · conciliación y P&L · USD")
+
+with st.sidebar:
     st.subheader("Período")
     desde = st.date_input("Desde", value=date(2026, 7, 1))
     hasta = st.date_input("Hasta", value=date(2026, 7, 31))
@@ -636,6 +1024,11 @@ gastos = _leer_dropbox(cargar_gastos, [], "los gastos reales")
 cobros = _leer_dropbox(cargar_cobros, [], "los cobros de distribución")
 novedades = _leer_dropbox(cargar_novedades, [], "las novedades")
 tulas_reportadas = _leer_dropbox(cargar_tulas_reportadas, [], "las tulas reportadas")
+pagos = _leer_dropbox(cargar_pagos, [], "los pagos")
+consolidados = _leer_dropbox(cargar_consolidaciones, [], "las consolidaciones")
+reajustes = _leer_dropbox(cargar_reajustes, [], "los reajustes")
+# Estado de pago: consolidar las filas PAGO sobre los gastos (append-only; último gana).
+gastos = modelos.consolidar_estado_pago(gastos, pagos)
 
 # Diagnóstico del datasource excel (archivos omitidos / advertencias).
 fuente = _fuente_astrid()
@@ -706,10 +1099,10 @@ def _drilldown_tula(m, novedad):
             unsafe_allow_html=True)
 
 
-def _seccion_sin_cobro(manifiestos, gastos, cobros):
+def _seccion_sin_cobro(manifiestos, gastos, cobros, consolidados=None):
     st.markdown('<div class="bloque-titulo">Manifiestos sin cobro (pendiente de seguimiento)</div>',
                 unsafe_allow_html=True)
-    sin = vista.manifiestos_sin_cobro(manifiestos, gastos, cobros)
+    sin = vista.manifiestos_sin_cobro(manifiestos, gastos, cobros, consolidados)
     if not sin:
         st.info("Todos los manifiestos del período tienen factura de aerolínea y cobro de ASTRID.")
         return
@@ -720,9 +1113,9 @@ def _seccion_sin_cobro(manifiestos, gastos, cobros):
     tabla(["Manifiesto", "Fecha", "Factura aerolínea", "Cobro ASTRID"], filas)
 
 
-tab_gen, tab_ent, tab_desp, tab_nov, tab_carga = st.tabs(
+tab_gen, tab_ent, tab_desp, tab_nov, tab_carga, tab_reaj = st.tabs(
     ["📊 Vista general", "✈️ Entrada a Colombia", "🚚 Despacho en Colombia",
-     "⚖️ Novedades", "📤 Cargar archivos"])
+     "⚖️ Novedades", "📤 Cargar archivos", "🧾 Reajustes"])
 
 
 # --------------------------------------------------------------------------- #
@@ -780,6 +1173,31 @@ with tab_gen:
         if k["ingresos"] is None:
             with c3[1]:
                 banner(config.mensaje_pendiente("valor_cobrado"), "info")
+
+        # --- Cuentas por pagar (estado de pago de los gastos del período) ---
+        st.markdown('<div class="bloque-titulo">Cuentas por pagar</div>', unsafe_allow_html=True)
+        ids_vg = {m["id"] for m in manif_vg}
+        gastos_vg = [g for g in gastos if g.get("manifiesto_id") in ids_vg]
+        cp = vista.cuentas_por_pagar(gastos_vg)
+        cpc = st.columns(4)
+        tarjeta(cpc[0], "Pendiente aerolíneas", _usd(cp["pendiente_aerolineas_usd"]))
+        tarjeta(cpc[1], "Pendiente ASTRID", _usd(cp["pendiente_astrid_usd"]))
+        tarjeta(cpc[2], "Pendiente total", _usd(cp["pendiente_total_usd"]))
+        tarjeta(cpc[3], "Vencido", _usd(cp["vencido_usd"]),
+                sub=(f"{cp['n_vencidas']} factura(s)" if cp["n_vencidas"] else None))
+
+        cons_vg = [c for c in consolidados if c.get("manifiesto_id") in ids_vg]
+        if cons_vg:
+            agg = vista.ahorro_consolidados(cons_vg, manif_vg, tarifario)
+            st.markdown('<div class="bloque-titulo">Ahorro por consolidación</div>',
+                        unsafe_allow_html=True)
+            ac = st.columns(3)
+            tarjeta(ac[0], "Costo individual (suma)", _usd(agg["individual_usd"]))
+            tarjeta(ac[1], "Costo consolidado", _usd(agg["consolidado_usd"]))
+            tarjeta(ac[2], "Ahorro", _usd(agg["ahorro_usd"]),
+                    sub=f"{agg['n_consolidados']} despacho(s)")
+
+        _seccion_sin_cobro(manif_vg, gastos_vg, cobros, cons_vg)
 
         # --- Gráficos nativos (sobrios) ---
         part = vista.participacion_por_departamento(manif_vg, top=12)
@@ -844,6 +1262,9 @@ with tab_ent:
                     valor_esperado=r["esperado_usd"], valor_real=r["factura_total_usd"],
                     delta=r["delta_total"])
 
+    st.markdown('<div class="bloque-titulo">Estado de pago a aerolíneas</div>', unsafe_allow_html=True)
+    _seccion_estado_pago(gastos, "importacion", "aerolíneas", usuario)
+
     st.markdown('<div class="bloque-titulo">Pagos a aerolínea (cronológico)</div>', unsafe_allow_html=True)
     _pagos_cronologico(gastos, "importacion", "aerolíneas", mostrar_awb=True)
 
@@ -864,8 +1285,17 @@ with tab_desp:
 
     ver_todas = st.toggle("Ver todas (incluye conciliadas)", value=False)
 
+    # Las guías dentro de un despacho consolidado NO se cuentan como individuales
+    # (evitar doble conteo): se concilian en la sección de consolidaciones.
+    guias_consol = vista.guias_consolidadas(consolidados)
+    if guias_consol:
+        st.caption(f"{len(guias_consol)} guía(s) en despachos consolidados — no se listan "
+                   "individualmente (ver «Despachos consolidados» abajo).")
+
     conciliaciones = []
     for c in cobros:
+        if c["guia"] in guias_consol:
+            continue  # cubierta por un consolidado
         info = indice_envios.get(c["guia"])
         if not info:
             continue  # guía sin envío en el datasource/período actual
@@ -892,6 +1322,13 @@ with tab_desp:
                         tipo="cobro_distribucion", discriminador=c["guia"], campo_disc="guia",
                         valor_esperado=r["esperado_usd"], valor_real=r["valor_cobrado_usd"],
                         delta=r["delta"])
+
+    st.divider()
+    _seccion_consolidaciones(manifiestos, tarifario, consolidados, usuario)
+
+    st.divider()
+    st.markdown('<div class="bloque-titulo">Estado de pago a ASTRID</div>', unsafe_allow_html=True)
+    _seccion_estado_pago(gastos, "distribucion", "ASTRID", usuario)
 
     st.markdown('<div class="bloque-titulo">Pagos a ASTRID (cronológico)</div>', unsafe_allow_html=True)
     _pagos_cronologico(gastos, "distribucion", "ASTRID", mostrar_awb=False)
@@ -935,7 +1372,7 @@ with tab_nov:
                         delta=n["dif_kg"])
 
     st.divider()
-    _seccion_sin_cobro(manifiestos, gastos, cobros)
+    _seccion_sin_cobro(manifiestos, gastos, cobros, consolidados)
 
     st.divider()
     st.markdown('<div class="bloque-titulo">Historial de novedades resueltas</div>', unsafe_allow_html=True)
@@ -967,7 +1404,19 @@ with tab_carga:
     st.caption("↑ Los pesos registrados se ven en «⚖️ Novedades» y habilitan la báscula en «✈️ Entrada».")
 
     st.divider()
-    st.markdown('<div class="bloque-titulo">Factura de despacho ASTRID</div>', unsafe_allow_html=True)
-    banner("🔜 Próximamente — extractor de facturas de despacho ASTRID declarado, aún no implementado.", "info")
-    st.file_uploader("Factura de despacho ASTRID (deshabilitado por ahora)",
-                     type=["pdf", "png", "jpg", "jpeg"], key="up_astrid", disabled=True)
+    _seccion_vision_despacho(usuario, proveedor=False, manifiestos=manifiestos)
+    st.caption("↑ Si el proveedor no sube su factura de despacho, la subimos nosotros "
+               "(misma lógica). Se refleja en «🚚 Despacho en Colombia».")
+
+
+# --------------------------------------------------------------------------- #
+# TAB 6 — Reajustes (recepción, archivo y listado editable)
+# --------------------------------------------------------------------------- #
+
+with tab_reaj:
+    st.markdown('<div class="bloque-titulo">Reajustes de despacho</div>', unsafe_allow_html=True)
+    banner("Fase de recepción y archivo únicamente: sin flujo de negocio (notificación, "
+           "quién asume la pérdida, cobro). Ver docs/PENDIENTES_API.md (módulo futuro).", "info")
+    _seccion_vision_reajuste(usuario)
+    st.divider()
+    _seccion_reajustes_listado(reajustes)

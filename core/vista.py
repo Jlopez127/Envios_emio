@@ -8,7 +8,7 @@ Respetan el modo parcial: lo que falta → None (nunca inventar).
 from __future__ import annotations
 
 from core import calculos
-from core.calculos import Tarifario
+from core.calculos import PAGO_PAGADO, PAGO_VENCIDO, Tarifario
 
 
 def _envios(manifiestos):
@@ -157,15 +157,17 @@ def envios_de_tula(manifiesto, tula_codigo, top_n=10) -> dict:
 # Manifiestos sin cobro (pendiente de seguimiento, no error)
 # --------------------------------------------------------------------------- #
 
-def manifiestos_sin_cobro(manifiestos, gastos, cobros) -> list:
+def manifiestos_sin_cobro(manifiestos, gastos, cobros, consolidados=None) -> list:
     """Manifiestos sin factura de aerolínea y/o sin cobro ASTRID registrado.
 
     Devuelve [{id, fecha, sin_factura_aerolinea, sin_cobro_astrid}] para los que les
     falta alguno — es "no me han cobrado → no he pagado", pendiente de seguimiento.
+    Un cobro ASTRID cuenta también si el manifiesto tiene un despacho consolidado.
     """
     ids_factura = {g["manifiesto_id"] for g in gastos if g.get("concepto") == "importacion"}
     ids_cobro_astrid = ({g["manifiesto_id"] for g in gastos if g.get("concepto") == "distribucion"}
-                        | {c.get("manifiesto_id") for c in (cobros or [])})
+                        | {c.get("manifiesto_id") for c in (cobros or [])}
+                        | {c.get("manifiesto_id") for c in (consolidados or [])})
     filas = []
     for m in manifiestos:
         sin_fact = m.get("id") not in ids_factura
@@ -174,3 +176,79 @@ def manifiestos_sin_cobro(manifiestos, gastos, cobros) -> list:
             filas.append({"id": m.get("id"), "fecha": str(m.get("fecha")),
                           "sin_factura_aerolinea": sin_fact, "sin_cobro_astrid": sin_astrid})
     return filas
+
+
+# --------------------------------------------------------------------------- #
+# Consolidaciones: guías cubiertas (para NO doble-contar) y ahorro agregado
+# --------------------------------------------------------------------------- #
+
+def guias_consolidadas(consolidados) -> set:
+    """Set de todas las guías incluidas en algún despacho consolidado. Se usa para
+    excluirlas del conteo/conciliación individual (evitar doble conteo)."""
+    guias = set()
+    for c in consolidados or []:
+        for g in c.get("guias") or []:
+            guias.add(g)
+    return guias
+
+
+def ahorro_consolidados(consolidados, manifiestos, tarifario=None) -> dict:
+    """Ahorro agregado de los despachos consolidados del período: suma de costos
+    individuales vs. suma de costos consolidados. {ahorro_usd, individual, consolidado,
+    n_consolidados, por_consolidado:[detalle]}."""
+    tarifario = tarifario or Tarifario()
+    por_id = {m.get("id"): m for m in manifiestos}
+    individual = consolidado = 0.0
+    por_consolidado = []
+    for c in consolidados or []:
+        res = calculos.ahorro_consolidado(c, por_id.get(c.get("manifiesto_id")), tarifario)
+        if not res.ok:
+            continue
+        individual += res.detalle["costo_individual_usd"]
+        consolidado += res.detalle["costo_consolidado_usd"]
+        por_consolidado.append(res.detalle)
+    return {
+        "n_consolidados": len(por_consolidado),
+        "individual_usd": round(individual, 2),
+        "consolidado_usd": round(consolidado, 2),
+        "ahorro_usd": round(individual - consolidado, 2),
+        "por_consolidado": por_consolidado,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Cuentas por pagar (estado de pago de los GastoReal ya consolidados)
+# --------------------------------------------------------------------------- #
+
+def cuentas_por_pagar(gastos, hoy=None) -> dict:
+    """Cuentas por pagar sobre GastoReal ya consolidados (con estado_pago).
+
+    Devuelve totales facturado/pagado/pendiente (aerolíneas y ASTRID) y vencido. El
+    estado efectivo (incluye "vencido") se deriva con calculos.estado_pago_efectivo.
+    """
+    facturado = pagado = pend_aero = pend_astrid = vencido = 0.0
+    n_vencidas = 0
+    for g in gastos or []:
+        total = g.get("total_usd") or 0
+        facturado += total
+        efectivo = calculos.estado_pago_efectivo(g, hoy)
+        if efectivo == PAGO_PAGADO:
+            pagado += total
+            continue
+        # pendiente o vencido
+        if g.get("concepto") == "importacion":
+            pend_aero += total
+        elif g.get("concepto") == "distribucion":
+            pend_astrid += total
+        if efectivo == PAGO_VENCIDO:
+            vencido += total
+            n_vencidas += 1
+    return {
+        "facturado_usd": round(facturado, 2),
+        "pagado_usd": round(pagado, 2),
+        "pendiente_aerolineas_usd": round(pend_aero, 2),
+        "pendiente_astrid_usd": round(pend_astrid, 2),
+        "pendiente_total_usd": round(pend_aero + pend_astrid, 2),
+        "vencido_usd": round(vencido, 2),
+        "n_vencidas": n_vencidas,
+    }

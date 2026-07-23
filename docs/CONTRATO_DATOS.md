@@ -54,8 +54,50 @@ contrato es la referencia única para modelos, mocks, interfaces y conciliación
 { fecha, manifiesto_id, proveedor,
   concepto ("importacion" | "distribucion"),
   referencia (nro_factura o guia), detalle_json, total_usd,
-  origen ("vision" | "manual") }
+  origen ("vision" | "manual"),
+  estado_pago ("pendiente" | "pagado", default "pendiente"),
+  fecha_pago | null, referencia_pago | null,
+  fecha_vencimiento | null, comprobante_ref | null }
 ```
+
+> **Estado de pago (append-only).** El gasto **nace `pendiente`**. Marcarlo `pagado` NO
+> edita la fila: se agrega una fila **Pago** (hoja `PAGOS`) que lo referencia por su
+> llave `(manifiesto_id, concepto, referencia)`. La lectura **consolida** (último pago
+> gana: `modelos.consolidar_estado_pago`). El estado **efectivo** deriva un tercer valor,
+> `"vencido"`, cuando no está pagado y `fecha_vencimiento` ya pasó
+> (`calculos.estado_pago_efectivo`). `terminos_pago` (ej. "Net 30 Days") viaja en
+> `detalle_json`. `comprobante_ref` es la ruta en Dropbox del comprobante de transferencia.
+
+### Pago
+```
+{ fecha, manifiesto_id, concepto, referencia, monto_usd,
+  referencia_pago, banco | null, destinatario | null,
+  comprobante_ref | null, usuario, estado_pago ("pagado") }
+```
+Marca de pago de un GastoReal (referencia el gasto por su llave). Los datos salen del
+**comprobante de transferencia** extraído por visión (admin sube el comprobante).
+
+### DespachoConsolidado
+```
+{ consolidado_id, manifiesto_id, guias: [guia], peso_total_lb,
+  valor_cobrado_usd, transportadora }
+```
+En Colombia se consolidan varios envíos en un despacho para abaratar costo (rompe el
+1:1 guía↔cobro). El **costo esperado** usa la MISMA regla de distribución sobre el
+**peso total** consolidado (no por guía). Las guías incluidas **no** se cuentan además
+como pendientes individuales (evitar doble conteo). Alta **manual** por admin
+(PENDIENTE_API si ASTRID llega a exponerlas).
+
+### Reajuste
+```
+{ fecha, manifiesto_id | null, guia | null, valor_usd | null, motivo | null,
+  texto_resumen | null, archivo_ref, usuario, origen }
+```
+Documento de reajuste recibido (proveedor o admin). En esta fase **solo recepción,
+extracción best-effort y archivo** (sin flujo de negocio). El formato es desconocido:
+la extracción es genérica y **todo campo puede ser `null`** (nunca se inventa); los
+campos son **editables a mano**. `archivo_ref` es la ruta del documento en Dropbox.
+Ver docs/PENDIENTES_API.md (módulo futuro).
 
 ### Tarifario
 Valores **DEMO genéricos** (los reales no viven en el código). Precedencia de carga:
@@ -78,7 +120,7 @@ Valores **DEMO genéricos** (los reales no viven en el código). Precedencia de 
 
 ## Excel de Dropbox (persistencia)
 
-Un solo archivo, **cuatro hojas**, todas **append-only**.
+Un solo archivo, **siete hojas** de datos (+ `TARIFARIO`), todas **append-only**.
 
 ### Hoja `NOVEDADES`
 Columnas = campos de **Novedad**:
@@ -108,12 +150,38 @@ acá porque el AWB **se asigna al despachar** (no nace con el manifiesto) y lleg
 mismo correo — así queda el vínculo **manifiesto↔awb** para el match de facturas.
 **Flujo provisional**: se elimina cuando la API traiga los pesos (ver docs/PENDIENTES_API.md).
 
+### Hoja `PAGOS`
+Columnas = campos de **Pago**:
+`fecha, manifiesto_id, concepto, referencia, monto_usd, referencia_pago, banco,
+destinatario, comprobante_ref, usuario, estado_pago`
+
+Registro de pagos (append-only). Marcar un gasto como pagado agrega una fila acá; la
+lectura del estado consolida sobre `GASTOS_REALES` (último pago gana). Los comprobantes
+de transferencia (imagen/PDF) se guardan en Dropbox `/portal_envios/comprobantes/` y su
+ruta va en `comprobante_ref`.
+
+### Hoja `CONSOLIDACIONES`
+Columnas = campos de **DespachoConsolidado**:
+`consolidado_id, manifiesto_id, guias, peso_total_lb, valor_cobrado_usd, transportadora`
+
+`guias` se serializa como **JSON string** en su celda (se reconstruye como lista al leer).
+
+### Hoja `REAJUSTES`
+Columnas = campos de **Reajuste**:
+`fecha, manifiesto_id, guia, valor_usd, motivo, texto_resumen, archivo_ref, usuario, origen`
+
+Reajustes recibidos (solo recepción/archivo). El documento se guarda en Dropbox
+`/portal_envios/reajustes/` y su ruta va en `archivo_ref`.
+
 ### Idempotencia — nunca duplicar
 
 - **Novedad:** clave = `(manifiesto_id, tula_codigo | guia, tipo)`.
 - **GastoReal:** clave = `(manifiesto_id, concepto, referencia)`.
 - **CobroDistribucion:** clave = `(manifiesto_id, guia)`.
 - **TulaReportada:** clave = `(manifiesto_id, numero_tula)`.
+- **Pago:** clave = `(manifiesto_id, concepto, referencia, referencia_pago)`.
+- **DespachoConsolidado:** clave = `(manifiesto_id, consolidado_id)`.
+- **Reajuste:** clave = `(archivo_ref)`.
 
 Antes de agregar una fila, verificar que no exista ya una con la misma clave. Nunca se
 duplican filas.
@@ -177,6 +245,24 @@ Dos objetos distintos, dos usos distintos. No confundirlos:
 `GASTOS_REALES`**. Nunca se suman cobros individuales directo al P&L — así se evita la
 doble contabilidad cuando existan ambos. (Analogía USA: la FacturaAerolinea concilia
 importación, pero el P&L usa el `GastoReal(concepto="importacion")`.)
+
+### Despacho consolidado — esperado sobre el peso TOTAL + métrica de ahorro
+
+El costo esperado de un `DespachoConsolidado` aplica la **misma** regla de distribución
+(`costo_distribucion`) sobre el **peso total** consolidado (`peso_total_lb`), no por
+guía (`calculos.costo_consolidado`). La **métrica de ahorro** compara la suma de los
+costos individuales (una por guía, a su `peso_lb` del manifiesto) contra el costo
+consolidado: `ahorro = individual − consolidado` (`calculos.ahorro_consolidado`). Las
+guías incluidas en un consolidado **se excluyen** de la conciliación/pendientes por
+guía para no doble-contar (`vista.guias_consolidadas`).
+
+### Estado de pago — consolidación append-only y `vencido` derivado
+
+Ver "GastoReal / Pago" arriba: el estado de pago se **consolida** aplicando las filas
+`PAGOS` sobre los gastos (último pago gana, sin editar el gasto), y el estado
+**efectivo** deriva `"vencido"` cuando el gasto no está pagado y su `fecha_vencimiento`
+ya pasó. Las **cuentas por pagar** (`vista.cuentas_por_pagar`) agregan
+facturado/pagado/pendiente (aerolíneas y ASTRID)/vencido sobre los gastos consolidados.
 
 ### FacturaAerolinea — `detalle_json` es la fuente canónica (sin almacén aparte)
 

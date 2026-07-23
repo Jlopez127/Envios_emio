@@ -95,3 +95,41 @@ def test_idempotencia_tula_reportada(dropbox):
     assert dropbox.agregar_tulas_reportadas(dict(r)) is False              # misma llave
     assert dropbox.agregar_tulas_reportadas({**r, "numero_tula": 2}) is True
     assert len(dropbox.leer_tulas_reportadas()) == 2
+
+
+# --- Pagos, consolidaciones, reajustes (nuevo alcance) -------------------- #
+
+def test_idempotencia_pago(dropbox):
+    p = {"manifiesto_id": "900007", "concepto": "importacion", "referencia": "DEMO-0001",
+         "referencia_pago": "OP-1", "monto_usd": 834.0, "estado_pago": "pagado"}
+    assert dropbox.agregar_pago(p) is True
+    assert dropbox.agregar_pago(dict(p)) is False                          # misma llave
+    assert dropbox.agregar_pago({**p, "referencia_pago": "OP-2"}) is True  # otra referencia
+
+
+def test_precarga_consolidado_demo(dropbox):
+    cons = dropbox.leer_consolidaciones()
+    assert len(cons) == 1
+    assert cons[0]["manifiesto_id"] == "900007"
+    assert cons[0]["guias"] == ["100006", "100007", "100008"]
+
+
+def test_idempotencia_consolidado(dropbox):
+    c = {"consolidado_id": "CONS-900007-01", "manifiesto_id": "900007", "guias": ["x"],
+         "peso_total_lb": 10, "valor_cobrado_usd": 12}
+    assert dropbox.agregar_consolidado(c) is False        # ya precargado (misma llave)
+    c2 = {**c, "consolidado_id": "CONS-900007-02"}
+    assert dropbox.agregar_consolidado(c2) is True
+
+
+def test_idempotencia_reajuste(dropbox):
+    r = {"archivo_ref": "/portal_envios/reajustes/r1.pdf", "manifiesto_id": "900007"}
+    assert dropbox.agregar_reajuste(r) is True
+    assert dropbox.agregar_reajuste(dict(r)) is False     # misma llave (archivo_ref)
+    assert dropbox.agregar_reajuste({**r, "archivo_ref": "/x/r2.pdf"}) is True
+
+
+def test_guardar_y_leer_archivo(dropbox):
+    ruta = dropbox.guardar_archivo("comprobantes", "c.png", b"datos")
+    assert ruta == "/portal_envios/comprobantes/c.png"
+    assert dropbox.leer_archivo(ruta) == b"datos"

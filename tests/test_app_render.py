@@ -16,11 +16,11 @@ def _run(env):
     return at
 
 
-def test_render_mock_5_tabs():
+def test_render_mock_6_tabs():
     at = _run({"DATASOURCE_ASTRID": "mock", "DATASOURCE_DROPBOX": "mock",
                "EXCEL_DIRECTORIO_LOCAL": ""})
     assert not at.exception, [e.value for e in at.exception]
-    assert len(at.tabs) == 5
+    assert len(at.tabs) == 6
 
 
 def test_render_excel_local_5_tabs():
