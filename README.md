@@ -1,18 +1,8 @@
----
-title: Portal Envíos Encargomío
-emoji: 📦
-colorFrom: gray
-colorTo: blue
-sdk: streamlit
-sdk_version: 1.50.0
-app_file: app.py
-pinned: false
----
-
 # Portal de Envíos Encargomío
 
 Dashboard financiero y de conciliación para la línea de envíos **Miami → Colombia**.
-Streamlit + Python, deploy en HuggingFace Spaces. **Sin base de datos**: los datos
+Streamlit + Python, deploy en Streamlit Community Cloud (desde el repo público). **Sin
+base de datos**: los datos
 operativos se consultan en vivo (mock / export ASTRID en Dropbox / API futura) y lo
 único que persiste es un Excel en Dropbox (append-only).
 
@@ -48,7 +38,7 @@ roles**, definidos por usuario en el secret de auth:
 6. **🧾 Reajustes** — recepción y archivo de reajustes (extracción genérica best-effort,
    editable) + listado. Solo recepción en esta fase (ver `docs/PENDIENTES_API.md`).
 
-## Flags de datasource (variables de entorno / Space)
+## Flags de datasource (variables de entorno / Secrets)
 
 | Flag | Valores | Qué controla |
 |---|---|---|
@@ -56,15 +46,18 @@ roles**, definidos por usuario en el secret de auth:
 | `DATASOURCE_DROPBOX` | `mock` \| `real` | Persistencia (y, en modo `excel`, origen de manifiestos desde Dropbox) |
 | `EXCEL_DIRECTORIO_LOCAL` | ruta | Modo `excel` local (gana sobre Dropbox); vacío + `DROPBOX=real` → Dropbox |
 
-Modo producción típico en el Space: `DATASOURCE_ASTRID=excel`, `DATASOURCE_DROPBOX=real`,
-`EXCEL_DIRECTORIO_LOCAL` sin setear. Detalle de modos: [`docs/CORRER_LOCAL.md`](docs/CORRER_LOCAL.md).
+Modo producción típico (en Secrets de Community Cloud): `DATASOURCE_ASTRID=excel`,
+`DATASOURCE_DROPBOX=real`, `EXCEL_DIRECTORIO_LOCAL` sin setear. En Community Cloud los
+flags van como claves top-level del TOML de Secrets (`config._flag` los lee de
+`st.secrets`). Detalle de modos: [`docs/CORRER_LOCAL.md`](docs/CORRER_LOCAL.md).
 
-## Secrets requeridos (en el Space → Settings → Secrets; nunca en el repo)
+## Secrets requeridos (en App settings → Secrets de Streamlit Community Cloud; nunca en el repo)
 
-`config.get_secret` acepta **ambas formas**: anidada (`.streamlit/secrets.toml` local) y
-**plana** (como HuggingFace Spaces suele cargar los secrets). Basta con proveer una.
+`config.get_secret` acepta **ambas formas**: anidada (`.streamlit/secrets.toml` local, y el
+TOML que se pega en Community Cloud) y **plana** (formas legacy `ANTHROPIC_API_KEY`, etc.).
+Basta con proveer una.
 
-| Secreto | Forma anidada (TOML) | Forma plana (HF) |
+| Secreto | Forma anidada (TOML) | Forma plana (legacy) |
 |---|---|---|
 | Anthropic (visión) | `[anthropic] api_key` | `ANTHROPIC_API_KEY` |
 | Dropbox | `[dropbox] app_key / app_secret / refresh_token` | `DROPBOX_APP_KEY` / `DROPBOX_APP_SECRET` / `DROPBOX_REFRESH_TOKEN` |
@@ -136,10 +129,12 @@ print(stauth.Hasher.hash("mi-password"))
 
 Ver [`docs/CORRER_LOCAL.md`](docs/CORRER_LOCAL.md). Tests: `python -m pytest -q`.
 
-## Deploy a HuggingFace Spaces
+## Deploy a Streamlit Community Cloud
 
-Ver [`docs/DEPLOY.md`](docs/DEPLOY.md). **Regla crítica:** merge a `main` en GitHub NO
-despliega; hay que hacer `git push hf main` explícito después de cada merge.
+Ver [`docs/DEPLOY.md`](docs/DEPLOY.md). **Auto-deploy:** con **push a `main`** en GitHub,
+Streamlit Community Cloud **redespliega solo** (~1–2 min) desde el repo público. Los
+secrets (credenciales, flags, `[auth]`) se pegan en **App settings → Secrets**. Si el
+arranque falla, revisar los **logs** en *Manage app* (ver DEPLOY.md).
 
 ## Migración a la API de ASTRID (cuando exista)
 

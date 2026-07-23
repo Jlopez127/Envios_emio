@@ -3,7 +3,7 @@
 Dashboard financiero y de conciliación para la línea de envíos **Miami → Colombia**.
 
 - **Stack:** Streamlit + Python.
-- **Deploy:** HuggingFace Spaces.
+- **Deploy:** Streamlit Community Cloud (desde el repo público).
 - **Sin base de datos.** Los datos operativos se consultan en vivo contra la API de
   ASTRID (aún no disponible). La única persistencia es un archivo Excel en Dropbox
   escrito por API.
@@ -48,11 +48,13 @@ Ante **ambigüedad**, el protocolo es exactamente:
 - El contrato de las hojas y las reglas de idempotencia están en
   [`CONTRATO_DATOS.md`](./CONTRATO_DATOS.md).
 
-## 5. Deploy — HuggingFace requiere push explícito
+## 5. Deploy — Streamlit Community Cloud (auto-deploy desde `main`)
 
-- **Merge a `main` NO despliega a HuggingFace.**
-- El deploy ocurre **solo** con `git push hf main` explícito, después del merge.
-- Nunca asumir que un cambio quedó publicado por el solo hecho de estar en `main`.
+- El portal se despliega en **Streamlit Community Cloud** desde el **repo público**.
+- **Push a `main` en GitHub → Community Cloud redespliega solo** (~1–2 min). No hay un
+  remoto de deploy aparte ni un paso manual de publicación.
+- Los secrets (credenciales, flags, auth) se pegan en **App settings → Secrets** de la
+  app, nunca en el repo. Ver [`DEPLOY.md`](./DEPLOY.md).
 
 ## 6. Moneda y unidades de peso
 

@@ -68,8 +68,9 @@ def get_manifiestos_legacy():
 
 # --------------------------------------------------------------------------- #
 # Secrets: forma anidada [seccion] clave, con fallback a formas planas legacy.
-# Así el secrets.toml local ([dropbox]/[anthropic]) funciona tal cual, y si en
-# HuggingFace Spaces los secrets se cargan planos (ANTHROPIC_API_KEY, etc.) también.
+# Así el secrets.toml local ([dropbox]/[anthropic]) y el TOML anidado pegado en Streamlit
+# Community Cloud funcionan tal cual, y las formas planas legacy (ANTHROPIC_API_KEY, etc.)
+# también, por si algún host las inyecta planas.
 # --------------------------------------------------------------------------- #
 
 def get_secret(seccion, clave, *nombres_legacy):

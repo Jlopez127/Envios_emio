@@ -29,7 +29,8 @@ api_key = "..."
 
 > Los secrets se leen con `config.get_secret`, que acepta la forma **anidada**
 > (`[dropbox] app_key`) y, como fallback, **planas** legacy (`DROPBOX_APP_KEY`,
-> `ANTHROPIC_API_KEY`, …) — que es como HuggingFace Spaces suele cargarlos.
+> `ANTHROPIC_API_KEY`, …). En Streamlit Community Cloud se pega el mismo TOML anidado en
+> **App settings → Secrets** (ver [`DEPLOY.md`](./DEPLOY.md)).
 
 ## Dos flags independientes
 

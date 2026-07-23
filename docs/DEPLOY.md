@@ -1,60 +1,100 @@
-# Deploy a HuggingFace Spaces — checklist
+# Deploy a Streamlit Community Cloud — checklist
 
-## ⛔ REGLA CRÍTICA
+## ✅ Auto-deploy desde `main`
 
-**Merge a `main` en GitHub NO despliega a HuggingFace.** GitHub y el Space son remotos
-git distintos. Después de CADA merge a `main` hay que ejecutar **siempre**:
-
-```bash
-git push hf main
-```
-
-Recién ahí el Space hace rebuild (~30–50 s) y publica los cambios. Si no ves tus cambios
-en el Space, casi seguro es que faltó este push.
-
-## Remotos git
+El portal se despliega en **Streamlit Community Cloud** desde el **repo público** de
+GitHub. **No hay un remoto de deploy aparte**: Community Cloud observa la rama `main` y
+**redespliega solo** en cada push.
 
 ```bash
-git remote -v
-# origin  -> GitHub (código, PRs)
-# hf      -> HuggingFace Space (deploy)
-
-# Si falta el remoto hf (una vez):
-git remote add hf https://huggingface.co/spaces/<usuario>/<space>
+git checkout main && git pull origin main
+git push origin main        # ← esto dispara el redeploy
 ```
 
-## Flujo de deploy
+Tras el push, Community Cloud detecta el commit y hace rebuild (**~1–2 min**). Si no ves
+tus cambios, esperá el rebuild o revisá los logs (ver abajo).
 
-1. Trabajar en una rama, PR y merge a `main` en GitHub (`origin`).
-2. `git checkout main && git pull origin main`.
-3. **`git push hf main`**  ← el paso que despliega. Esperar el rebuild (~30–50 s).
-4. Abrir el Space y verificar el arranque (ver abajo).
+## Alta de la app (una sola vez)
 
-## Secrets en el Space
+1. Entrar a **[share.streamlit.io](https://share.streamlit.io)** y loguearse con GitHub.
+2. **Create app → Deploy a public app from GitHub**.
+3. Repo: `Jlopez127/Envios_emio` · Branch: `main` · Main file path: `app.py`.
+4. **Deploy**. La app queda en una URL `*.streamlit.app`.
 
-Space → **Settings → Variables and secrets**. Cargar (forma plana, que es como HF los
-inyecta; `config.get_secret` también acepta la anidada):
+> El repo debe ser **público** (Community Cloud gratuito). `requirements.txt` se instala
+> automáticamente en el build; `streamlit` está pinneado a `1.50.0` (ver más abajo).
 
-- `ANTHROPIC_API_KEY`
-- `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`
-- Auth: subir la sección `[auth]` (credenciales hasheadas + cookie). En HF, si no se
-  puede cargar TOML anidado como secret plano, usar un **Secret File** `secrets.toml` con
-  la sección `[auth]` (y opcionalmente el resto), montado en `.streamlit/secrets.toml`.
-- Flags como **Variables** (no secretas): `DATASOURCE_ASTRID=excel`,
-  `DATASOURCE_DROPBOX=real`. **No** setear `EXCEL_DIRECTORIO_LOCAL`.
+## Secrets (App settings → Secrets)
+
+En la app: **⋮ → Settings → Secrets**. Se pega **un TOML** (Community Cloud lo expone como
+`st.secrets`; `config.get_secret` acepta la forma anidada y también las formas planas). Los
+**flags** van como claves top-level del TOML — `config._flag` los lee de `st.secrets`
+cuando no hay variable de entorno:
+
+```toml
+# Flags de datasource (producción típica)
+DATASOURCE_ASTRID = "excel"
+DATASOURCE_DROPBOX = "real"
+# NO setear EXCEL_DIRECTORIO_LOCAL (así los manifiestos salen de Dropbox)
+
+[anthropic]
+api_key = "sk-ant-..."
+
+[dropbox]
+app_key = "..."
+app_secret = "..."
+refresh_token = "..."
+# opcionales: manifiestos_path / excel_path
+
+# Auth (login obligatorio en producción; usernames y roles en minúsculas)
+[auth]
+usuarios = "admin1,admin2,proveedor1"   # o AUTH_USERS
+roles = "proveedor1:proveedor"          # o campo `role` por usuario (ver abajo)
+
+[auth.cookie]
+name = "encargomio_portal"
+key = "una-clave-larga-aleatoria"
+expiry_days = 7
+
+[auth.credentials.usernames.admin1]
+name = "Admin Uno"
+password = "$2b$..."   # hash bcrypt
+role = "admin"
+
+[auth.credentials.usernames.proveedor1]
+name = "ASTRID"
+password = "$2b$..."
+role = "proveedor"     # acceso EXTERNO: solo su vista propia
+```
+
+Guardar los secrets **reinicia la app** automáticamente.
 
 > **En producción `[auth]` DEBE estar configurado.** Sin `[auth]`, el portal arranca en
 > **modo abierto** (con aviso visible), sin login — aceptable solo en desarrollo local.
+> **Roles:** ver README → "Roles y aislamiento". El rol `proveedor` ve SOLO su vista.
 
 ## Verificar el arranque
 
-1. El Space queda en estado **Running** (verde).
-2. Aparece el **login** (usuario en minúsculas). Loguearse con `admin1`/`admin2`/`admin3` (o los reales configurados en `AUTH_USERS`).
-3. Cargan las 5 tabs. En modo real, la **primera carga** parsea los manifiestos desde
-   Dropbox (~1–2 min la primera vez; luego cacheado 10 min). Achicar el rango de fechas
-   para probar más rápido.
-4. Revisar los **logs** del Space (pestaña *Logs*) si algo falla — un secret faltante
-   sale como advertencia visible en el dashboard, no como crash.
+1. La app queda **Running** en el dashboard de share.streamlit.io.
+2. Aparece el **login** (usuario en minúsculas). Loguearse con un admin (`admin1`…) o el
+   proveedor, según `AUTH_USERS`/`AUTH_ROLES`.
+3. Cargan las tabs según el rol (6 tabs admin; el proveedor ve solo su vista). En modo
+   real, la **primera carga** parsea los manifiestos desde Dropbox (~1–2 min la primera
+   vez; luego cacheado 10 min). Achicar el rango de fechas para probar más rápido.
+
+## Revisar los logs si falla el arranque
+
+Si la app no levanta o muestra un error:
+
+- **Desde la app en vivo:** botón **"Manage app"** (abajo a la derecha) → abre el panel de
+  **logs** en tiempo real.
+- **Desde el dashboard** [share.streamlit.io](https://share.streamlit.io): en el tile de
+  la app, **⋮ → Manage app** → mismo panel de logs.
+- Ahí se ven el traceback del build/arranque y los `print`/warnings. Un **secret faltante**
+  sale como advertencia visible en el dashboard (no como crash) — igual conviene revisar
+  los logs para confirmar `DATASOURCE_*` y credenciales.
+- **Reboot / rebuild limpio:** en **Manage app → ⋮ → Reboot app** (fuerza reinstalar
+  dependencias y reiniciar). Útil si un secret nuevo no se tomó.
 
 ## Si el CSS se ve raro tras un rebuild
 
@@ -67,7 +107,7 @@ El CSS ejecutivo depende de la estructura del DOM de Streamlit. Por eso `streaml
   con CSS: si el sidebar se ve mal, revisar `config.toml`, no el CSS.
 - El CSS global va con `st.markdown(unsafe_allow_html=True)` (nunca `st.html`, que vacía
   los `<style>`).
-- Forzar un rebuild limpio: *Settings → Factory reboot* del Space.
+- Forzar un rebuild limpio: **Manage app → ⋮ → Reboot app**.
 
 ## 🔒 Datos de clientes — verificar ANTES de cada push
 
@@ -84,3 +124,6 @@ git check-ignore .streamlit/secrets.toml docs_internos tests/fixtures/EJEMPLO.xl
 
 Si aparece un `.xlsx` real o `secrets.toml` en `git ls-files`, **detener el push**,
 sacarlo del índice (`git rm --cached <archivo>`) y revisar `.gitignore`.
+
+> **Repo público:** como el deploy es desde el repo público, cualquier cosa commiteada es
+> visible. Doble cuidado con secrets y PII.

@@ -140,7 +140,7 @@ def test_get_secret_anidado_y_plano(monkeypatch):
     # Forma anidada [anthropic] api_key (secrets.toml local).
     monkeypatch.setitem(sys.modules, "streamlit", _fake_streamlit({"anthropic": {"api_key": "K-anidada"}}))
     assert config.get_secret("anthropic", "api_key", "ANTHROPIC_API_KEY") == "K-anidada"
-    # Forma plana legacy (como suele cargar HuggingFace Spaces).
+    # Forma plana legacy (por si algún host inyecta los secrets planos).
     monkeypatch.setitem(sys.modules, "streamlit", _fake_streamlit({"ANTHROPIC_API_KEY": "K-plana"}))
     assert config.get_secret("anthropic", "api_key", "ANTHROPIC_API_KEY") == "K-plana"
     # Ausente en ambas formas.
