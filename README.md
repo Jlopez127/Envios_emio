@@ -77,52 +77,57 @@ Basta con proveer una.
 > (secret/env) **>** default DEMO (`imp_tarifa_kg = 1.00`, etc.). Editás las tarifas sin
 > re-deploy cambiando la hoja `TARIFARIO`.
 
-Ejemplo `.streamlit/secrets.toml` (local; **gitignoreado**):
+### Estructura del bloque `[auth]` (placeholders — **sin valores reales**)
+
+> **Los valores reales (cookie key, hashes, contraseñas) NUNCA van en el repo.** Se pegan
+> **solo** en **App settings → Secrets** de Streamlit Community Cloud (y, para dev local,
+> en `.streamlit/secrets.toml`, que está gitignoreado). Este README documenta **la forma**
+> del bloque, no sus valores.
 
 ```toml
+# --- Visión y persistencia (mismos placeholders; reales solo en Secrets) ---
 [anthropic]
-api_key = "sk-ant-..."
+api_key = "<ANTHROPIC_API_KEY>"
 
 [dropbox]
-app_key = "..."
-app_secret = "..."
-refresh_token = "..."
+app_key = "<DROPBOX_APP_KEY>"
+app_secret = "<DROPBOX_APP_SECRET>"
+refresh_token = "<DROPBOX_REFRESH_TOKEN>"
 
+# --- Auth: cookie de sesión ---
 [auth.cookie]
 name = "encargomio_portal"
-key = "una-clave-larga-aleatoria"
+key = "<COOKIE_KEY>"         # token largo aleatorio: secrets.token_urlsafe(48)
 expiry_days = 7
 
-[auth.credentials.usernames.admin1]
-name = "Admin Uno"
-email = "admin1@example.com"
-password = "$2b$..."   # hash bcrypt
-role = "admin"          # opcional; sin role y estando autorizado → admin
+# --- Auth: un bloque por usuario (username SIEMPRE en minúsculas) ---
+[auth.credentials.usernames.<usuario_admin>]
+name = "<Nombre a mostrar>"
+password = "<hash-bcrypt $2b$...>"   # hash bcrypt, NUNCA la contraseña en claro
+role = "admin"                        # acceso total (todas las tabs)
 
-[auth.credentials.usernames.admin2]
-name = "Admin Dos"
-password = "$2b$..."
-
-[auth.credentials.usernames.proveedor1]
-name = "ASTRID"
-password = "$2b$..."
-role = "proveedor"      # acceso EXTERNO: solo su vista propia
+[auth.credentials.usernames.<usuario_proveedor>]
+name = "<Nombre a mostrar>"
+password = "<hash-bcrypt $2b$...>"
+role = "proveedor"                    # acceso EXTERNO: SOLO su vista propia
 ```
 
-**Roles.** El rol se define por usuario: campo `role` (`admin` | `proveedor`) en el
-bloque de credenciales, o forma plana `AUTH_ROLES="proveedor1:proveedor,..."` (env o
-`[auth] roles`), que **gana** sobre el campo `role`. Sin rol explícito, un usuario
-autorizado (en `AUTH_USERS`) es **`admin`**. Usernames y roles en **minúsculas**.
+**Roles.** El rol se define **por usuario** con el campo `role` (`admin` | `proveedor`)
+dentro de su bloque de credenciales. Alternativa plana: `AUTH_ROLES="usuario:rol,..."`
+(env o `[auth] roles`), que **gana** sobre el campo `role`. Sin rol explícito, un usuario
+autorizado se toma como **`admin`**. El rol `proveedor` (acceso externo) ve **solo su
+tab**; el resto (P&L, aerolínea, clientes, novedades) **no se construye** en su sesión.
 
-**Usernames SIEMPRE en minúsculas** (bug de casing de streamlit-authenticator; el portal
-normaliza a minúsculas y los usuarios deben ingresar en minúsculas). Usuarios autorizados:
-`admin1`, `admin2`, `admin3` (DEMO en el código; los reales se cargan por secret/env `AUTH_USERS`, coma-separados). Sin `[auth]` → **modo abierto** con aviso (solo desarrollo).
+**Casing.** Usernames y roles **SIEMPRE en minúsculas** (bug de casing de
+streamlit-authenticator; el portal normaliza a minúsculas y los usuarios ingresan en
+minúsculas). Sin `[auth]` → **modo abierto** con aviso (solo desarrollo local).
 
-Generar un hash bcrypt:
+**Generar los valores** (localmente, para pegarlos en Secrets):
 
 ```python
-import streamlit_authenticator as stauth
-print(stauth.Hasher.hash("mi-password"))
+import secrets, streamlit_authenticator as stauth
+print("cookie key:", secrets.token_urlsafe(48))         # → [auth.cookie] key
+print("hash:", stauth.Hasher.hash("<contraseña-en-claro>"))  # → password de cada usuario
 ```
 
 ## Correr local
